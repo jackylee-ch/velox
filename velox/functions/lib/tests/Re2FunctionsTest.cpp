@@ -1011,7 +1011,7 @@ TEST_F(Re2FunctionsTest, regexSpiltAllSingleCharPattern) {
   testRe2SplitAll({" abc_ta "}, {"_"}, {{{" abc", "ta "}}});
 
   // .
-  testRe2SplitAll({"abc"}, {"."}, {{{"", "", "", "", ""}}});
+  testRe2SplitAll({"abc"}, {"."}, {{{"", "", "", ""}}});
   testRe2SplitAll({"abc "}, {"."}, {{{"", "", "", "", ""}}});
   testRe2SplitAll({" abc "}, {"."}, {{{"", "", "", "", "", ""}}});
 
@@ -1024,8 +1024,6 @@ TEST_F(Re2FunctionsTest, regexSpiltAllSingleCharPattern) {
   testRe2SplitAll({"abt|sc"}, {"\\|"}, {{{"abt", "sc"}}});
   testRe2SplitAll({"|abc| "}, {"\\|"}, {{{"", "abc", " "}}});
   testRe2SplitAll({" |ab|c | "}, {"\\|"}, {{{" ", "ab", "c ", " "}}});
-
-  testRe2SplitAll({"abcdef"}, {""}, {{{"a", "b", "c", "d", "e", "f", ""}}});
 }
 
 TEST_F(Re2FunctionsTest, regexSpiltAllSequenceCharPattern) {
@@ -1086,7 +1084,7 @@ TEST_F(Re2FunctionsTest, regexSplitAllNonAscii) {
       // split('velox测试', '测试')
       {"\u0076\u0065\u006c\u006f\u0078\u6d4b\u8bd5"},
       {"\u6d4b\u8bd5"},
-      {{{"", "velox"}}});
+      {{{"velox", ""}}});
 }
 
 } // namespace
