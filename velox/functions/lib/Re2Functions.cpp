@@ -748,7 +748,6 @@ class Re2SplitAllConstantPattern final : public VectorFunction {
       const TypePtr& /* outputType */,
       EvalCtx& context,
       VectorPtr& resultRef) const final {
-    VELOX_CHECK(args.size() == 2);
     try {
       checkForBadPattern(re_);
     } catch (const std::exception& e) {
