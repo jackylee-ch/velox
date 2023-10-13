@@ -730,6 +730,8 @@ void re2SplitAll(
     const re2::StringPiece remaining = input.substr(pos);
     arrayWriter.add_item().setNoCopy(
         StringView(remaining.data(), remaining.size()));
+  } else if (pos == input.size()) {
+    arrayWriter.add_item().setNoCopy(StringView(nullptr, 0));
   }
 
   resultWriter.commit();
