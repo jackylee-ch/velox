@@ -1224,23 +1224,16 @@ void re2SplitAll(
   resultWriter.commit();
 }
 
-class Re2SplitAllConstantPattern final : public VectorFunction {
+class Re2SplitAllConstantPattern final : public exec::VectorFunction {
  public:
-  explicit Re2SplitAllConstantPattern(StringView pattern)
-      : re_(toStringPiece(pattern), RE2::Quiet) {}
+  Re2SplitAllConstantPattern(RE2& re2): re_(re2) {}
 
   void apply(
       const SelectivityVector& rows,
       std::vector<VectorPtr>& args,
       const TypePtr& /* outputType */,
-      EvalCtx& context,
+      exec::EvalCtx& context,
       VectorPtr& resultRef) const final {
-    try {
-      checkForBadPattern(re_);
-    } catch (const std::exception& e) {
-      context.setErrors(rows, std::current_exception());
-      return;
-    }
 
     BaseVector::ensureWritable(
         rows, ARRAY(VARCHAR()), context.pool(), resultRef);
@@ -1264,7 +1257,7 @@ class Re2SplitAllConstantPattern final : public VectorFunction {
   }
 
  private:
-  RE2 re_;
+  RE2& re_;
 };
 
 template <bool (*Fn)(StringView, const RE2&)>
@@ -2017,9 +2010,9 @@ re2ExtractAllSignatures() {
   };
 }
 
-std::shared_ptr<VectorFunction> makeRe2SplitAll(
+std::shared_ptr<exec::VectorFunction> makeRe2SplitAll(
     const std::string& name,
-    const std::vector<VectorFunctionArg>& inputArgs,
+    const std::vector<exec::VectorFunctionArg>& inputArgs,
     const core::QueryConfig& /*config*/) {
   auto numArgs = inputArgs.size();
   VELOX_USER_CHECK_EQ(
@@ -2046,20 +2039,14 @@ std::shared_ptr<VectorFunction> makeRe2SplitAll(
 
   auto pattern = constantPattern->as<ConstantVector<StringView>>()->valueAt(0);
 
-  // void apply(
-  //     const SelectivityVector& rows,
-  //     std::vector<VectorPtr>& args,
-  //     const TypePtr& /* outputType */,
-  //     EvalCtx& context,
-  //     VectorPtr& resultRef) const final {
-  //   try {
-  //     checkForBadPattern(re_);
-  //   } catch (const std::exception& e) {
-  //     context.setErrors(rows, std::current_exception());
-  //     return;
-  //   }
-
-  return std::make_shared<Re2SplitAllConstantPattern>(pattern);
+  try {
+    auto re_ = std::make_unique<RE2>(toStringPiece(pattern));
+    checkForBadPattern(*re_);
+    return std::make_shared<Re2SplitAllConstantPattern>(*re_);
+  } catch (...) {
+    return std::make_shared<exec::AlwaysFailingVectorFunction>(
+        std::current_exception());
+  }
 }
 
 std::vector<std::shared_ptr<exec::FunctionSignature>> re2SplitAllSignatures() {
