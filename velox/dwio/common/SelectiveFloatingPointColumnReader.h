@@ -26,14 +26,14 @@ class SelectiveFloatingPointColumnReader : public SelectiveColumnReader {
   using ValueType = TRequested;
   SelectiveFloatingPointColumnReader(
       const TypePtr& requestedType,
-      std::shared_ptr<const dwio::common::TypeWithId> dataType,
+      std::shared_ptr<const dwio::common::TypeWithId> fileType,
       FormatParams& params,
       velox::common::ScanSpec& scanSpec)
       : SelectiveColumnReader(
             requestedType,
+            std::move(fileType),
             params,
-            scanSpec,
-            std::move(dataType)) {}
+            scanSpec) {}
 
   // Offers fast path only if data and result widths match.
   bool hasBulkPath() const override {
@@ -89,7 +89,13 @@ void SelectiveFloatingPointColumnReader<TData, TRequested>::processFilter(
     velox::common::Filter* filter,
     RowSet rows,
     ExtractValues extractValues) {
-  switch (filter ? filter->kind() : velox::common::FilterKind::kAlwaysTrue) {
+  if (filter == nullptr) {
+    readHelper<Reader, velox::common::AlwaysTrue, isDense>(
+        &dwio::common::alwaysTrue(), rows, extractValues);
+    return;
+  }
+
+  switch (filter->kind()) {
     case velox::common::FilterKind::kAlwaysTrue:
       readHelper<Reader, velox::common::AlwaysTrue, isDense>(
           filter, rows, extractValues);
@@ -171,14 +177,14 @@ void SelectiveFloatingPointColumnReader<TData, TRequested>::readCommon(
       } else {
         processValueHook<Reader, false>(rows, scanSpec_->valueHook());
       }
-      return;
-    }
-    if (isDense) {
-      processFilter<Reader, true>(
-          scanSpec_->filter(), rows, ExtractToReader(this));
     } else {
-      processFilter<Reader, false>(
-          scanSpec_->filter(), rows, ExtractToReader(this));
+      if (isDense) {
+        processFilter<Reader, true>(
+            scanSpec_->filter(), rows, ExtractToReader(this));
+      } else {
+        processFilter<Reader, false>(
+            scanSpec_->filter(), rows, ExtractToReader(this));
+      }
     }
   } else {
     if (isDense) {

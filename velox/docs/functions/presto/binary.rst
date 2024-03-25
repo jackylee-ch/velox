@@ -12,7 +12,7 @@ Binary Functions
 
 .. function:: from_base64url(string) -> varbinary
 
-    Decodes ``string`` data from the base64 encoded representation using the `URL safe alphabet <https://www.rfc-editor.org/rfc/rfc4648#section-5>`_ into a varbinary. 
+    Decodes ``string`` data from the base64 encoded representation using the `URL safe alphabet <https://www.rfc-editor.org/rfc/rfc4648#section-5>`_ into a varbinary.
 
 .. function:: from_big_endian_32(varbinary) -> integer
 
@@ -41,6 +41,10 @@ Binary Functions
 .. function:: hmac_sha512(binary, key) -> varbinary
 
     Computes the HMAC with sha512 of ``binary`` with the given ``key``.
+
+.. function:: length(binary) -> bigint
+
+    Returns the length of ``binary`` in bytes.
 
 .. function:: md5(binary) -> varbinary
 
@@ -86,9 +90,17 @@ Binary Functions
 
     Encodes ``binary`` into a hex string representation.
 
+.. function:: to_ieee754_32(real) -> varbinary
+
+    Encodes ``real`` in a 32-bit big-endian binary according to IEEE 754 single-precision floating-point format.
+
 .. function:: to_ieee754_64(double) -> varbinary
 
     Encodes ``double`` in a 64-bit big-endian binary according to IEEE 754 double-precision floating-point format.
+
+.. function:: from_ieee754_64(binary) -> double
+
+    Decodes the 64-bit big-endian ``binary`` in IEEE 754 double-precision floating-point format.
 
 .. function:: xxhash64(binary) -> varbinary
 

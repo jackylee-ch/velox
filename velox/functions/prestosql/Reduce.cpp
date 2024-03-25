@@ -19,6 +19,34 @@
 namespace facebook::velox::functions {
 namespace {
 
+// Throws if any array in any of 'rows' has more than 10K elements.
+// Evaluating 'reduce' lambda function on very large arrays is too slow.
+void checkArraySizes(
+    const SelectivityVector& rows,
+    DecodedVector& decodedArray,
+    exec::EvalCtx& context) {
+  const auto* indices = decodedArray.indices();
+  const auto* rawSizes = decodedArray.base()->as<ArrayVector>()->rawSizes();
+
+  static const vector_size_t kMaxArraySize = 10'000;
+
+  rows.applyToSelected([&](auto row) {
+    if (decodedArray.isNullAt(row)) {
+      return;
+    }
+    const auto size = rawSizes[indices[row]];
+    try {
+      VELOX_USER_CHECK_LT(
+          size,
+          kMaxArraySize,
+          "reduce lambda function doesn't support arrays with more than {} elements",
+          kMaxArraySize);
+    } catch (VeloxUserError&) {
+      context.setError(row, std::current_exception());
+    }
+  });
+}
+
 /// Populates indices of the n-th elements of the arrays.
 /// Selects 'row' in 'arrayRows' if corresponding array has an n-th element.
 /// Sets elementIndices[row] to the index of the n-th element in the 'elements'
@@ -67,39 +95,73 @@ class ReduceFunction : public exec::VectorFunction {
   void apply(
       const SelectivityVector& rows,
       std::vector<VectorPtr>& args,
-      const TypePtr& /* outputType */,
+      const TypePtr& outputType,
       exec::EvalCtx& context,
       VectorPtr& result) const override {
     VELOX_CHECK_EQ(args.size(), 4);
-
     // Flatten input array.
     exec::LocalDecodedVector arrayDecoder(context, *args[0], rows);
     auto& decodedArray = *arrayDecoder.get();
 
-    auto flatArray = flattenArray(rows, args[0], decodedArray);
+    checkArraySizes(rows, decodedArray, context);
 
+    exec::LocalSelectivityVector remainingRows(context, rows);
+    context.deselectErrors(*remainingRows);
+
+    doApply(*remainingRows, args, decodedArray, outputType, context, result);
+  }
+
+  static std::vector<std::shared_ptr<exec::FunctionSignature>> signatures() {
+    // array(T), S, function(S, T, S), function(S, R) -> R
+    return {exec::FunctionSignatureBuilder()
+                .typeVariable("T")
+                .typeVariable("S")
+                .typeVariable("R")
+                .returnType("R")
+                .argumentType("array(T)")
+                .argumentType("S")
+                .argumentType("function(S,T,S)")
+                .argumentType("function(S,R)")
+                .build()};
+  }
+
+ private:
+  void doApply(
+      const SelectivityVector& rows,
+      std::vector<VectorPtr>& args,
+      DecodedVector& decodedArray,
+      const TypePtr& outputType,
+      exec::EvalCtx& context,
+      VectorPtr& result) const {
+    auto flatArray = flattenArray(rows, args[0], decodedArray);
+    // Identify the rows need to be computed.
+    exec::LocalSelectivityVector nonNullRowsHolder(*context.execCtx());
+    const SelectivityVector* nonNullRows = &rows;
+    if (flatArray->mayHaveNulls()) {
+      nonNullRowsHolder.get(rows);
+      nonNullRowsHolder->deselectNulls(
+          flatArray->rawNulls(), rows.begin(), rows.end());
+      nonNullRows = nonNullRowsHolder.get();
+    }
     const auto& initialState = args[1];
     auto partialResult =
         BaseVector::create(initialState->type(), rows.end(), context.pool());
-
-    // Process null and empty arrays.
-    auto* rawNulls = flatArray->rawNulls();
+    // Process empty arrays.
     auto* rawSizes = flatArray->rawSizes();
-    rows.applyToSelected([&](auto row) {
-      if (rawNulls && bits::isBitNull(rawNulls, row)) {
-        partialResult->setNull(row, true);
-      } else if (rawSizes[row] == 0) {
+    nonNullRows->applyToSelected([&](auto row) {
+      if (rawSizes[row] == 0) {
         partialResult->copy(initialState.get(), row, row, 1);
       }
     });
 
     // Make sure already populated entries in 'partialResult' do not get
     // overwritten if 'arrayRows' shrinks in subsequent iterations.
-    const SelectivityVector& validRowsInReusedResult = rows;
+    const SelectivityVector& validRowsInReusedResult = *nonNullRows;
 
     // Loop over lambda functions and apply these to elements of the base array.
     // In most cases there will be only one function and the loop will run once.
-    auto inputFuncIt = args[2]->asUnchecked<FunctionVector>()->iterator(&rows);
+    auto inputFuncIt =
+        args[2]->asUnchecked<FunctionVector>()->iterator(nonNullRows);
 
     BufferPtr elementIndices =
         allocateIndices(flatArray->size(), context.pool());
@@ -156,7 +218,8 @@ class ReduceFunction : public exec::VectorFunction {
 
     // Apply output function.
     VectorPtr localResult;
-    auto outputFuncIt = args[3]->asUnchecked<FunctionVector>()->iterator(&rows);
+    auto outputFuncIt =
+        args[3]->asUnchecked<FunctionVector>()->iterator(nonNullRows);
     while (auto entry = outputFuncIt.next()) {
       std::vector<VectorPtr> lambdaArgs = {partialResult};
       entry.callable->apply(
@@ -168,21 +231,11 @@ class ReduceFunction : public exec::VectorFunction {
           nullptr,
           &localResult);
     }
+    if (flatArray->rawNulls()) {
+      exec::EvalCtx::addNulls(
+          rows, flatArray->rawNulls(), context, outputType, localResult);
+    }
     context.moveOrCopyResult(localResult, rows, result);
-  }
-
-  static std::vector<std::shared_ptr<exec::FunctionSignature>> signatures() {
-    // array(T), S, function(S, T, S), function(S, R) -> R
-    return {exec::FunctionSignatureBuilder()
-                .typeVariable("T")
-                .typeVariable("S")
-                .typeVariable("R")
-                .returnType("R")
-                .argumentType("array(T)")
-                .argumentType("S")
-                .argumentType("function(S,T,S)")
-                .argumentType("function(S,R)")
-                .build()};
   }
 };
 } // namespace

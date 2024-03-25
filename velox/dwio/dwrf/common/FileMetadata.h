@@ -405,11 +405,12 @@ class FooterWrapper : public ProtoWrapperBase {
 
   bool hasRowIndexStride() const {
     return format_ == DwrfFormat::kDwrf ? dwrfPtr()->has_rowindexstride()
-                                        : false;
+                                        : orcPtr()->has_rowindexstride();
   }
 
   uint32_t rowIndexStride() const {
-    return format_ == DwrfFormat::kDwrf ? dwrfPtr()->rowindexstride() : 0;
+    return format_ == DwrfFormat::kDwrf ? dwrfPtr()->rowindexstride()
+                                        : orcPtr()->rowindexstride();
   }
 
   int stripeCacheOffsetsSize() const {
@@ -494,3 +495,10 @@ class FooterWrapper : public ProtoWrapperBase {
 };
 
 } // namespace facebook::velox::dwrf
+
+template <>
+struct fmt::formatter<facebook::velox::dwrf::DwrfFormat> : formatter<int> {
+  auto format(facebook::velox::dwrf::DwrfFormat s, format_context& ctx) {
+    return formatter<int>::format(static_cast<int>(s), ctx);
+  }
+};

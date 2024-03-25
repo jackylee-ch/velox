@@ -13,3 +13,6 @@
 # limitations under the License.
 
 add_subdirectory(common)
+add_subdirectory(exec)
+add_subdirectory(vector)
+add_subdirectory(dwio)

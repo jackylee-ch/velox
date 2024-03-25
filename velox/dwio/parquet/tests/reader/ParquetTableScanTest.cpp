@@ -24,9 +24,7 @@
 #include "velox/exec/tests/utils/PlanBuilder.h"
 #include "velox/type/tests/SubfieldFiltersBuilder.h"
 
-#ifndef VELOX_ENABLE_BACKWARD_COMPATIBILITY
 #include "velox/connectors/hive/HiveConfig.h"
-#endif
 
 using namespace facebook::velox;
 using namespace facebook::velox::exec;
@@ -43,7 +41,8 @@ class ParquetTableScanTest : public HiveConnectorTestBase {
     auto hiveConnector =
         connector::getConnectorFactory(
             connector::hive::HiveConnectorFactory::kHiveConnectorName)
-            ->newConnector(kHiveConnectorId, nullptr);
+            ->newConnector(
+                kHiveConnectorId, std::make_shared<core::MemConfig>());
     connector::registerConnector(hiveConnector);
   }
 
@@ -265,11 +264,11 @@ TEST_F(ParquetTableScanTest, decimalSubfieldFilter) {
   VELOX_ASSERT_THROW(
       assertSelectWithFilter(
           {"a"}, {"a < 1000.7"}, "", "SELECT a FROM tmp WHERE a < 1000.7"),
-      "Scalar function signature is not supported: lt(DECIMAL(5,2), DECIMAL(5,1))");
+      "Scalar function signature is not supported: lt(DECIMAL(5, 2), DECIMAL(5, 1))");
   VELOX_ASSERT_THROW(
       assertSelectWithFilter(
           {"a"}, {"a = 1000.7"}, "", "SELECT a FROM tmp WHERE a = 1000.7"),
-      "Scalar function signature is not supported: eq(DECIMAL(5,2), DECIMAL(5,1))");
+      "Scalar function signature is not supported: eq(DECIMAL(5, 2), DECIMAL(5, 1))");
 }
 
 // Core dump is fixed.
@@ -414,12 +413,12 @@ TEST_F(ParquetTableScanTest, readAsLowerCase) {
           std::thread::hardware_concurrency());
   std::shared_ptr<core::QueryCtx> queryCtx =
       std::make_shared<core::QueryCtx>(executor.get());
-  std::unordered_map<std::string, std::string> configs = {
+  std::unordered_map<std::string, std::string> session = {
       {std::string(
-           connector::hive::HiveConfig::kFileColumnNamesReadAsLowerCase),
+           connector::hive::HiveConfig::kFileColumnNamesReadAsLowerCaseSession),
        "true"}};
-  queryCtx->setConnectorConfigOverridesUnsafe(
-      kHiveConnectorId, std::move(configs));
+  queryCtx->setConnectorSessionOverridesUnsafe(
+      kHiveConnectorId, std::move(session));
   params.queryCtx = queryCtx;
   params.planNode = plan;
   const int numSplitsPerFile = 1;
@@ -446,6 +445,6 @@ TEST_F(ParquetTableScanTest, readAsLowerCase) {
 
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
-  folly::init(&argc, &argv, false);
+  folly::Init init{&argc, &argv, false};
   return RUN_ALL_TESTS();
 }

@@ -14,12 +14,14 @@
 add_executable(
   velox_functions_lib_test
   ApproxMostFrequentStreamSummaryTest.cpp
+  CheckNestedNullsTest.cpp
   DateTimeFormatterTest.cpp
   IsNullTest.cpp
   IsNotNullTest.cpp
   KllSketchTest.cpp
   MapConcatTest.cpp
   Re2FunctionsTest.cpp
+  RepeatTest.cpp
   ZetaDistributionTest.cpp)
 
 add_test(

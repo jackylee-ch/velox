@@ -32,13 +32,11 @@
 
 #include "velox/common/file/File.h"
 #include "velox/common/file/Region.h"
-#include "velox/dwio/common/IoStatistics.h"
+#include "velox/common/io/IoStatistics.h"
 #include "velox/dwio/common/MetricsLog.h"
 
 namespace facebook::velox::dwio::common {
-
-constexpr uint64_t DEFAULT_AUTO_PRELOAD_SIZE =
-    (static_cast<const uint64_t>((1ul << 20) * 72));
+using namespace facebook::velox::io;
 
 /**
  * An abstract interface for providing readers a stream of bytes.
@@ -126,9 +124,6 @@ class InputStream {
       folly::Range<folly::IOBuf*> iobufs,
       const LogType purpose) = 0;
 
-  // case insensitive find
-  static uint32_t ifind(const std::string& src, const std::string& target);
-
   const std::string& getName() const;
 
   virtual void logRead(uint64_t offset, uint64_t length, LogType purpose);
@@ -148,7 +143,7 @@ class ReadFileInputStream final : public InputStream {
       const MetricsLogPtr& metricsLog = MetricsLog::voidLog(),
       IoStatistics* FOLLY_NULLABLE stats = nullptr);
 
-  virtual ~ReadFileInputStream() {}
+  ~ReadFileInputStream() override = default;
 
   uint64_t getLength() const final override {
     return readFile_->size();

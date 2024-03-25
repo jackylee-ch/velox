@@ -21,28 +21,32 @@ add_library(
   ArrayAggAggregate.cpp
   AverageAggregate.cpp
   BitwiseAggregates.cpp
+  BitwiseXorAggregate.cpp
   BoolAggregates.cpp
   CentralMomentsAggregates.cpp
+  Compare.cpp
+  CountAggregate.cpp
   CountIfAggregate.cpp
   CovarianceAggregates.cpp
   ChecksumAggregate.cpp
   EntropyAggregates.cpp
+  GeometricMeanAggregate.cpp
   HistogramAggregate.cpp
   MapAggAggregate.cpp
   MapUnionAggregate.cpp
   MapUnionSumAggregate.cpp
+  MaxSizeForStatsAggregate.cpp
   MinMaxAggregates.cpp
   MinMaxByAggregates.cpp
   MultiMapAggAggregate.cpp
-  CountAggregate.cpp
   PrestoHasher.cpp
+  ReduceAgg.cpp
+  RegisterAggregateFunctions.cpp
   SetAggregates.cpp
   SumAggregate.cpp
-  ValueList.cpp
-  VarianceAggregates.cpp
-  MaxSizeForStatsAggregate.cpp
   SumDataSizeForStatsAggregate.cpp
-  RegisterAggregateFunctions.cpp)
+  ValueList.cpp
+  VarianceAggregates.cpp)
 
 target_link_libraries(
   velox_aggregates

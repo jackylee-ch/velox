@@ -18,12 +18,12 @@
 namespace facebook::velox::exec {
 
 void ExchangeClient::addRemoteTaskId(const std::string& taskId) {
-  RequestSpec toRequest;
+  std::vector<RequestSpec> requestSpecs;
   std::shared_ptr<ExchangeSource> toClose;
   {
     std::lock_guard<std::mutex> l(queue_->mutex());
 
-    bool duplicate = !taskIds_.insert(taskId).second;
+    bool duplicate = !remoteTaskIds_.insert(taskId).second;
     if (duplicate) {
       // Do not add sources twice. Presto protocol may add duplicate sources
       // and the task updates have no guarantees of arriving in order.
@@ -33,7 +33,7 @@ void ExchangeClient::addRemoteTaskId(const std::string& taskId) {
     std::shared_ptr<ExchangeSource> source;
     try {
       source = ExchangeSource::create(taskId, destination_, queue_, pool_);
-    } catch (const VeloxException& e) {
+    } catch (const VeloxException&) {
       throw;
     } catch (const std::exception& e) {
       // Task ID can be very long. Truncate to 128 characters.
@@ -46,13 +46,10 @@ void ExchangeClient::addRemoteTaskId(const std::string& taskId) {
     if (closed_) {
       toClose = std::move(source);
     } else {
-      if (!source->supportsFlowControl()) {
-        allSourcesSupportFlowControl_ = false;
-      }
       sources_.push_back(source);
       queue_->addSourceLocked();
-
-      toRequest = pickSourcesToRequestLocked();
+      emptySources_.push(source);
+      requestSpecs = pickSourcesToRequestLocked();
     }
   }
 
@@ -60,7 +57,7 @@ void ExchangeClient::addRemoteTaskId(const std::string& taskId) {
   if (toClose) {
     toClose->close();
   } else {
-    request(toRequest);
+    request(std::move(requestSpecs));
   }
 }
 
@@ -91,8 +88,17 @@ folly::F14FastMap<std::string, RuntimeMetric> ExchangeClient::stats() const {
 
   folly::F14FastMap<std::string, RuntimeMetric> stats;
   for (const auto& source : sources_) {
-    for (const auto& [name, value] : source->stats()) {
-      stats[name].addValue(value);
+    if (source->supportsMetrics()) {
+      for (const auto& [name, value] : source->metrics()) {
+        if (UNLIKELY(stats.count(name) == 0)) {
+          stats.insert(std::pair(name, RuntimeMetric(value.unit)));
+        }
+        stats[name].merge(value);
+      }
+    } else {
+      for (const auto& [name, value] : source->stats()) {
+        stats[name].addValue(value);
+      }
     }
   }
 
@@ -105,120 +111,120 @@ folly::F14FastMap<std::string, RuntimeMetric> ExchangeClient::stats() const {
   return stats;
 }
 
-std::unique_ptr<SerializedPage> ExchangeClient::next(
-    bool* atEnd,
-    ContinueFuture* future) {
-  RequestSpec toRequest;
-  std::unique_ptr<SerializedPage> page;
+std::vector<std::unique_ptr<SerializedPage>>
+ExchangeClient::next(uint32_t maxBytes, bool* atEnd, ContinueFuture* future) {
+  std::vector<RequestSpec> requestSpecs;
+  std::vector<std::unique_ptr<SerializedPage>> pages;
   {
     std::lock_guard<std::mutex> l(queue_->mutex());
     *atEnd = false;
-    page = queue_->dequeueLocked(atEnd, future);
+    pages = queue_->dequeueLocked(maxBytes, atEnd, future);
     if (*atEnd) {
-      return page;
+      return pages;
     }
 
-    if (page && queue_->totalBytes() > maxQueuedBytes_) {
-      return page;
+    if (!pages.empty() && queue_->totalBytes() > maxQueuedBytes_) {
+      return pages;
     }
 
-    toRequest = pickSourcesToRequestLocked();
+    requestSpecs = pickSourcesToRequestLocked();
   }
 
   // Outside of lock
-  request(toRequest);
-  return page;
+  request(std::move(requestSpecs));
+  return pages;
 }
 
-void ExchangeClient::request(const RequestSpec& requestSpec) {
-  for (auto& source : requestSpec.sources) {
-    auto future = source->request(requestSpec.maxBytes);
-    if (future.valid()) {
-      auto& exec = folly::QueuedImmediateExecutor::instance();
-      std::move(future)
-          .via(&exec)
-          .thenValue(
-              [&](auto&& /* unused */) { request(pickSourcesToRequest()); })
-          .thenError(
-              folly::tag_t<std::exception>{},
-              [&](const std::exception& e) { queue_->setError(e.what()); });
+void ExchangeClient::request(std::vector<RequestSpec>&& requestSpecs) {
+  auto self = shared_from_this();
+  for (auto& spec : requestSpecs) {
+    auto future = folly::SemiFuture<ExchangeSource::Response>::makeEmpty();
+    if (spec.maxBytes == 0) {
+      future = spec.source->requestDataSizes(kRequestDataSizesMaxWait);
+    } else {
+      future = spec.source->request(spec.maxBytes, kRequestDataMaxWait);
     }
+    VELOX_CHECK(future.valid());
+    std::move(future)
+        .via(executor_)
+        .thenValue([self, spec = std::move(spec)](auto&& response) {
+          std::vector<RequestSpec> requestSpecs;
+          {
+            std::lock_guard<std::mutex> l(self->queue_->mutex());
+            if (self->closed_) {
+              return;
+            }
+            if (!response.atEnd) {
+              if (!response.remainingBytes.empty()) {
+                for (auto bytes : response.remainingBytes) {
+                  VELOX_CHECK_GT(bytes, 0);
+                }
+                self->producingSources_.push(
+                    {std::move(spec.source),
+                     std::move(response.remainingBytes)});
+              } else {
+                self->emptySources_.push(std::move(spec.source));
+              }
+            }
+            self->totalPendingBytes_ -= spec.maxBytes;
+            requestSpecs = self->pickSourcesToRequestLocked();
+          }
+          self->request(std::move(requestSpecs));
+        })
+        .thenError(
+            folly::tag_t<std::exception>{}, [self](const std::exception& e) {
+              self->queue_->setError(e.what());
+            });
   }
 }
 
-int32_t ExchangeClient::countPendingSourcesLocked() {
-  int32_t numPending = 0;
-  for (auto& source : sources_) {
-    if (source->isRequestPendingLocked()) {
-      ++numPending;
-    }
-  }
-  return numPending;
-}
-
-ExchangeClient::RequestSpec ExchangeClient::pickSourcesToRequest() {
-  std::lock_guard<std::mutex> l(queue_->mutex());
-  return pickSourcesToRequestLocked();
-}
-
-int64_t ExchangeClient::getAveragePageSize() {
-  auto averagePageSize =
-      std::min<int64_t>(maxQueuedBytes_, queue_->averageReceivedPageBytes());
-  if (averagePageSize == 0) {
-    averagePageSize = 1 << 20; // 1 MB.
-  }
-
-  return averagePageSize;
-}
-
-int32_t ExchangeClient::getNumSourcesToRequestLocked(int64_t averagePageSize) {
-  if (!allSourcesSupportFlowControl_) {
-    return sources_.size();
-  }
-
-  // Figure out how many more 'averagePageSize' fit into 'maxQueuedBytes_'.
-  // Make sure to leave room for 'numPending' pages.
-  const auto numPending = countPendingSourcesLocked();
-
-  auto numToRequest = std::max<int32_t>(
-      1, (maxQueuedBytes_ - queue_->totalBytes()) / averagePageSize);
-  if (numToRequest <= numPending) {
-    return 0;
-  }
-
-  return numToRequest - numPending;
-}
-
-ExchangeClient::RequestSpec ExchangeClient::pickSourcesToRequestLocked() {
-  if (closed_ || queue_->totalBytes() >= maxQueuedBytes_) {
+std::vector<ExchangeClient::RequestSpec>
+ExchangeClient::pickSourcesToRequestLocked() {
+  if (closed_) {
     return {};
   }
-
-  const auto averagePageSize = getAveragePageSize();
-  const auto numToRequest = getNumSourcesToRequestLocked(averagePageSize);
-
-  if (numToRequest == 0) {
-    return {};
+  std::vector<RequestSpec> requestSpecs;
+  while (!emptySources_.empty()) {
+    auto& source = emptySources_.front();
+    VELOX_CHECK(source->shouldRequestLocked());
+    requestSpecs.push_back({std::move(source), 0});
+    emptySources_.pop();
   }
-
-  RequestSpec toRequest;
-  toRequest.maxBytes = averagePageSize;
-
-  // Pick up to 'numToRequest' next sources to request data from.
-  for (auto i = 0; i < sources_.size(); ++i) {
-    auto& source = sources_[nextSourceIndex_];
-
-    nextSourceIndex_ = (nextSourceIndex_ + 1) % sources_.size();
-
-    if (source->shouldRequestLocked()) {
-      toRequest.sources.push_back(source);
-      if (toRequest.sources.size() == numToRequest) {
+  int64_t availableSpace =
+      maxQueuedBytes_ - queue_->totalBytes() - totalPendingBytes_;
+  while (availableSpace > 0 && !producingSources_.empty()) {
+    auto& source = producingSources_.front().source;
+    int64_t requestBytes = 0;
+    for (auto bytes : producingSources_.front().remainingBytes) {
+      availableSpace -= bytes;
+      if (availableSpace < 0) {
         break;
       }
+      requestBytes += bytes;
     }
+    if (requestBytes == 0) {
+      VELOX_CHECK_LT(availableSpace, 0);
+      break;
+    }
+    VELOX_CHECK(source->shouldRequestLocked());
+    requestSpecs.push_back({std::move(source), requestBytes});
+    producingSources_.pop();
+    totalPendingBytes_ += requestBytes;
   }
-
-  return toRequest;
+  if (queue_->totalBytes() == 0 && totalPendingBytes_ == 0 &&
+      !producingSources_.empty()) {
+    // We have full capacity but still cannot initiate one single data transfer.
+    // Let the transfer happen in this case to avoid getting stuck.
+    auto& source = producingSources_.front().source;
+    auto requestBytes = producingSources_.front().remainingBytes.at(0);
+    LOG(INFO) << "Requesting large single page " << requestBytes
+              << " bytes, exceeding capacity " << maxQueuedBytes_;
+    VELOX_CHECK(source->shouldRequestLocked());
+    requestSpecs.push_back({std::move(source), requestBytes});
+    producingSources_.pop();
+    totalPendingBytes_ += requestBytes;
+  }
+  return requestSpecs;
 }
 
 ExchangeClient::~ExchangeClient() {
@@ -233,16 +239,17 @@ std::string ExchangeClient::toString() const {
   return out.str();
 }
 
-std::string ExchangeClient::toJsonString() const {
+folly::dynamic ExchangeClient::toJson() const {
   folly::dynamic obj = folly::dynamic::object;
   obj["taskId"] = taskId_;
   obj["closed"] = closed_;
   folly::dynamic clientsObj = folly::dynamic::object;
   int index = 0;
   for (auto& source : sources_) {
-    clientsObj[std::to_string(index++)] = source->toJsonString();
+    clientsObj[std::to_string(index++)] = source->toJson();
   }
-  return folly::toPrettyJson(obj);
+  obj["clients"] = clientsObj;
+  return obj;
 }
 
 } // namespace facebook::velox::exec

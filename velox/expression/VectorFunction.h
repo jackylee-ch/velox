@@ -127,6 +127,10 @@ class VectorFunction {
       const {
     return std::nullopt;
   }
+
+  virtual FunctionCanonicalName getCanonicalName() const {
+    return FunctionCanonicalName::kUnknown;
+  }
 };
 
 /// Vector function that generates the specified error for every row. Use this
@@ -136,8 +140,15 @@ class VectorFunction {
 /// evaluate the function.
 class AlwaysFailingVectorFunction final : public VectorFunction {
  public:
-  explicit AlwaysFailingVectorFunction(std::exception_ptr exceptionPtr)
-      : exceptionPtr_{std::move(exceptionPtr)} {}
+  explicit AlwaysFailingVectorFunction(
+      std::exception_ptr exceptionPtr,
+      bool defaultNullBehavior = true)
+      : exceptionPtr_{std::move(exceptionPtr)},
+        defaultNullBehavior_{defaultNullBehavior} {}
+
+  bool isDefaultNullBehavior() const override {
+    return defaultNullBehavior_;
+  }
 
   void apply(
       const SelectivityVector& rows,
@@ -150,12 +161,28 @@ class AlwaysFailingVectorFunction final : public VectorFunction {
 
  private:
   std::exception_ptr exceptionPtr_;
+  const bool defaultNullBehavior_;
+};
+
+// This functions is used when we know a function will never be called because
+// it is default null with a literal null input value. For example like(c0,
+// null).
+class ApplyNeverCalled final : public VectorFunction {
+  void apply(
+      const SelectivityVector&,
+      std::vector<VectorPtr>&,
+      const TypePtr&,
+      EvalCtx&,
+      VectorPtr&) const final {
+    VELOX_UNREACHABLE("Not expected to be called.")
+  }
 };
 
 // Factory for functions which are template generated from simple functions.
 class SimpleFunctionAdapterFactory {
  public:
   virtual std::unique_ptr<VectorFunction> createVectorFunction(
+      const std::vector<TypePtr>& inputTypes,
       const std::vector<VectorPtr>& constantInputs,
       const core::QueryConfig& config) const = 0;
   virtual ~SimpleFunctionAdapterFactory() = default;

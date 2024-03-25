@@ -14,13 +14,15 @@
 
 add_executable(
   velox_functions_spark_aggregates_test
+  AverageAggregationTest.cpp
   BitwiseXorAggregationTest.cpp
   BloomFilterAggAggregateTest.cpp
+  CentralMomentsAggregationTest.cpp
   FirstAggregateTest.cpp
   LastAggregateTest.cpp
-  AverageAggregationTest.cpp
   Main.cpp
-  MinMaxByAggregationTest.cpp)
+  MinMaxByAggregationTest.cpp
+  SumAggregationTest.cpp)
 
 add_test(velox_functions_spark_aggregates_test
          velox_functions_spark_aggregates_test)

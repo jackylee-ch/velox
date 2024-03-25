@@ -322,10 +322,7 @@ class HistogramAggregate : public exec::Aggregate {
   }
 
   void destroy(folly::Range<char**> groups) override {
-    for (auto group : groups) {
-      auto groupMap = value<AccumulatorType>(group);
-      std::destroy_at(groupMap);
-    }
+    destroyAccumulators<AccumulatorType>(groups);
   }
 
  private:
@@ -341,7 +338,12 @@ class HistogramAggregate : public exec::Aggregate {
   DecodedVector decodedIntermediate_;
 };
 
-exec::AggregateRegistrationResult registerHistogram(const std::string& name) {
+} // namespace
+
+void registerHistogramAggregate(
+    const std::string& prefix,
+    bool withCompanionFunctions,
+    bool overwrite) {
   std::vector<std::shared_ptr<exec::AggregateFunctionSignature>> signatures;
   for (const auto inputType :
        {"boolean",
@@ -363,7 +365,8 @@ exec::AggregateRegistrationResult registerHistogram(const std::string& name) {
                              .build());
   }
 
-  return exec::registerAggregateFunction(
+  auto name = prefix + kHistogram;
+  exec::registerAggregateFunction(
       name,
       std::move(signatures),
       [name](
@@ -405,13 +408,10 @@ exec::AggregateRegistrationResult registerHistogram(const std::string& name) {
                 name,
                 inputType->kindName());
         }
-      });
-}
-
-} // namespace
-
-void registerHistogramAggregate(const std::string& prefix) {
-  registerHistogram(prefix + kHistogram);
+      },
+      {false /*orderSensitive*/},
+      withCompanionFunctions,
+      overwrite);
 }
 
 } // namespace facebook::velox::aggregate::prestosql

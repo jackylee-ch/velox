@@ -43,14 +43,14 @@ void ScanState::updateRawState() {
 
 SelectiveColumnReader::SelectiveColumnReader(
     const TypePtr& requestedType,
+    std::shared_ptr<const dwio::common::TypeWithId> fileType,
     dwio::common::FormatParams& params,
-    velox::common::ScanSpec& scanSpec,
-    std::shared_ptr<const dwio::common::TypeWithId> type)
+    velox::common::ScanSpec& scanSpec)
     : memoryPool_(params.pool()),
-      fileType_(type),
-      formatData_(params.toFormatData(type, scanSpec)),
-      scanSpec_(&scanSpec),
-      requestedType_(requestedType) {}
+      requestedType_(requestedType),
+      fileType_(fileType),
+      formatData_(params.toFormatData(fileType, scanSpec)),
+      scanSpec_(&scanSpec) {}
 
 void SelectiveColumnReader::filterRowGroups(
     uint64_t rowGroupSize,
@@ -66,6 +66,7 @@ const std::vector<SelectiveColumnReader*>& SelectiveColumnReader::children()
 }
 
 void SelectiveColumnReader::seekTo(vector_size_t offset, bool readsNullsOnly) {
+  VELOX_TRACE_HISTORY_PUSH("seekTo %d %d", offset, readsNullsOnly);
   if (offset == readOffset_) {
     return;
   }
@@ -110,6 +111,7 @@ void SelectiveColumnReader::prepareNulls(
       }
     }
   }
+  returnReaderNulls_ = false;
   if (resultNulls_ && resultNulls_->unique() &&
       resultNulls_->capacity() >= bits::nbytes(numRows) + simd::kPadding) {
     // Clear whole capacity because future uses could hit
@@ -220,6 +222,75 @@ void SelectiveColumnReader::getIntValues(
   }
 }
 
+void SelectiveColumnReader::getUnsignedIntValues(
+    RowSet rows,
+    const TypePtr& requestedType,
+    VectorPtr* result) {
+  switch (requestedType->kind()) {
+    case TypeKind::TINYINT:
+      switch (valueSize_) {
+        case 1:
+          getFlatValues<uint8_t, uint8_t>(rows, result, requestedType);
+          break;
+        case 4:
+          getFlatValues<uint32_t, uint8_t>(rows, result, requestedType);
+          break;
+        default:
+          VELOX_FAIL("Unsupported value size: {}", valueSize_);
+      }
+      break;
+    case TypeKind::SMALLINT:
+      switch (valueSize_) {
+        case 2:
+          getFlatValues<uint16_t, uint16_t>(rows, result, requestedType);
+          break;
+        case 4:
+          getFlatValues<uint32_t, uint16_t>(rows, result, requestedType);
+          break;
+        default:
+          VELOX_FAIL("Unsupported value size: {}", valueSize_);
+      }
+      break;
+    case TypeKind::INTEGER:
+      switch (valueSize_) {
+        case 4:
+          getFlatValues<uint32_t, uint32_t>(rows, result, requestedType);
+          break;
+        default:
+          VELOX_FAIL("Unsupported value size: {}", valueSize_);
+      }
+      break;
+    case TypeKind::BIGINT:
+      switch (valueSize_) {
+        case 4:
+          getFlatValues<uint32_t, uint64_t>(rows, result, requestedType);
+          break;
+        case 8:
+          getFlatValues<uint64_t, uint64_t>(rows, result, requestedType);
+          break;
+        default:
+          VELOX_FAIL("Unsupported value size: {}", valueSize_);
+      }
+      break;
+    case TypeKind::HUGEINT:
+      switch (valueSize_) {
+        case 8:
+          getFlatValues<uint64_t, uint128_t>(rows, result, requestedType);
+          break;
+        case 16:
+          getFlatValues<uint128_t, uint128_t>(rows, result, requestedType);
+          break;
+        default:
+          VELOX_FAIL("Unsupported value size: {}", valueSize_);
+      }
+      break;
+    default:
+      VELOX_FAIL(
+          "Not a valid type for unsigned integer reader: {}",
+          requestedType->toString());
+  }
+}
+
 template <>
 void SelectiveColumnReader::getFlatValues<int8_t, bool>(
     RowSet rows,
@@ -247,13 +318,10 @@ void SelectiveColumnReader::getFlatValues<int8_t, bool>(
           ~simd::toBitMask(zero == xsimd::load_unaligned(rawBytes + i));
     }
   }
-  BufferPtr nulls = anyNulls_
-      ? (returnReaderNulls_ ? nullsInReadRange_ : resultNulls_)
-      : nullptr;
   *result = std::make_shared<FlatVector<bool>>(
       &memoryPool_,
       type,
-      nulls,
+      resultNulls(),
       numValues_,
       std::move(boolValues),
       std::move(stringBuffers_));

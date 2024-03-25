@@ -113,6 +113,13 @@ class PeeledEncoding {
   static std::shared_ptr<PeeledEncoding> peel(
       const std::vector<VectorPtr>& vectorsToPeel,
       const SelectivityVector& rows,
+      DecodedVector& decodedVector,
+      bool canPeelsHaveNulls,
+      std::vector<VectorPtr>& peeledVectors);
+
+  static std::shared_ptr<PeeledEncoding> peel(
+      const std::vector<VectorPtr>& vectorsToPeel,
+      const SelectivityVector& rows,
       LocalDecodedVector& decodedVector,
       bool canPeelsHaveNulls,
       std::vector<VectorPtr>& peeledVectors);
@@ -164,7 +171,7 @@ class PeeledEncoding {
       vector_size_t innerRow = indices ? indices[outerRow] : constantWrapIndex_;
       func(outerRow, innerRow);
     });
-  };
+  }
 
  private:
   PeeledEncoding() = default;
@@ -174,7 +181,7 @@ class PeeledEncoding {
   bool peelInternal(
       const std::vector<VectorPtr>& vectorsToPeel,
       const SelectivityVector& rows,
-      LocalDecodedVector& decodedVector,
+      DecodedVector& decodedVector,
       bool canPeelsHaveNulls,
       std::vector<VectorPtr>& peeledVectors);
 

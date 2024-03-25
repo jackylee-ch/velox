@@ -27,6 +27,17 @@ Mathematical Functions
     verified for performance reasons. Returns ``high`` for all values of ``x``
     when ``low`` is greater than ``high``.
 
+.. function:: cosine_similarity(map(varchar, double), map(varchar, double)) -> double
+
+    Returns the `cosine similarity <https://en.wikipedia.org/wiki/Cosine_similarity>`_ between the vectors represented as map(varchar, double).
+    If any input map is empty, the function returns NaN.
+
+        SELECT cosine_similarity(MAP(ARRAY['a'], ARRAY[1.0]), MAP(ARRAY['a'], ARRAY[2.0])); -- 1.0
+
+        SELECT cosine_similarity(MAP(ARRAY['a', 'b'], ARRAY[1.0, 2.0]), MAP(ARRAY['a', 'b'], ARRAY[NULL, 3.0])); -- NULL
+
+        SELECT cosine_similarity(MAP(ARRAY[], ARRAY[]), MAP(ARRAY['a', 'b'], ARRAY[2, 3])); -- NaN
+
 .. function:: degrees(x) -> double
 
     Converts angle x in radians to degrees.
@@ -275,6 +286,12 @@ Probability Functions: cdf
     Compute the Gamma cdf with given shape and scale parameters: P(N < value; shape, scale).
     The shape and scale parameters must be positive real numbers. The value must be a non-negative real number.
 
+.. function:: laplace_cdf(mean, scale, value) -> double
+
+     Compute the Laplace cdf with given mean and scale parameters: P(N < value; mean, scale).
+     The mean and value must be real values and the scale parameter must be a
+     positive value (all of type DOUBLE).
+
 .. function:: normal_cdf(mean, sd, value) -> double
 
     Compute the Normal cdf with given mean and standard deviation (sd): P(N < value; mean, sd).
@@ -287,6 +304,11 @@ Probability Functions: cdf
     The lambda parameter must be a positive real number (of type DOUBLE) and value must be a non-negative integer.
 
 
+.. function:: weibull_cdf(a, b, value) -> double
+
+    Compute the Weibull cdf with given parameters a, b: P(N <= value). The ``a``
+    and ``b`` parameters must be positive doubles and ``value`` must also be a double.
+
 ====================================
 Probability Functions: inverse_cdf
 ====================================
@@ -296,3 +318,18 @@ Probability Functions: inverse_cdf
     Compute the inverse of the Beta cdf with given a, b parameters for the cumulative
     probability (p): P(N < n). The a, b parameters must be positive real values (all of type DOUBLE).
     The probability p must lie on the interval [0, 1].
+
+
+====================================
+Statistical Functions
+====================================
+
+.. function:: wilson_interval_lower(successes, trials, z) -> double
+
+    Returns the lower bound of the Wilson score interval of a Bernoulli trial process
+    at a confidence specified by the z-score z.
+
+.. function:: wilson_interval_upper(successes, trials, z) -> double
+
+    Returns the upper bound of the Wilson score interval of a Bernoulli trial process
+    at a confidence specified by the z-score z.

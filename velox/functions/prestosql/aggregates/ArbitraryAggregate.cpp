@@ -60,10 +60,11 @@ class ArbitraryAggregate : public SimpleNumericAggregate<T, T, T> {
     DecodedVector decoded(*args[0], rows);
 
     if (decoded.isConstantMapping()) {
-      if (decoded.isNullAt(0)) {
+      auto begin = rows.begin();
+      if (decoded.isNullAt(begin)) {
         return;
       }
-      auto value = decoded.valueAt<T>(0);
+      auto value = decoded.valueAt<T>(begin);
       rows.applyToSelected([&](vector_size_t i) {
         if (exec::Aggregate::isNull(groups[i])) {
           updateValue(groups[i], value);
@@ -101,14 +102,15 @@ class ArbitraryAggregate : public SimpleNumericAggregate<T, T, T> {
       return;
     }
     DecodedVector decoded(*args[0], rows);
+    auto begin = rows.begin();
 
     if (decoded.isConstantMapping()) {
-      if (decoded.isNullAt(0)) {
+      if (decoded.isNullAt(begin)) {
         return;
       }
-      updateValue(group, decoded.valueAt<T>(0));
+      updateValue(group, decoded.valueAt<T>(begin));
     } else if (!decoded.mayHaveNulls()) {
-      updateValue(group, decoded.valueAt<T>(0));
+      updateValue(group, decoded.valueAt<T>(begin));
     } else {
       // Find the first non-null value.
       rows.testSelected([&](vector_size_t i) {
@@ -195,7 +197,7 @@ class NonNumericArbitrary : public exec::Aggregate {
       const std::vector<VectorPtr>& args,
       bool /*unused*/) override {
     DecodedVector decoded(*args[0], rows, true);
-    if (decoded.isConstantMapping() && decoded.isNullAt(0)) {
+    if (decoded.isConstantMapping() && decoded.isNullAt(rows.begin())) {
       // nothing to do; all values are nulls
       return;
     }
@@ -226,15 +228,19 @@ class NonNumericArbitrary : public exec::Aggregate {
       const SelectivityVector& rows,
       const std::vector<VectorPtr>& args,
       bool /*unused*/) override {
+    auto* accumulator = value<SingleValueAccumulator>(group);
+    if (accumulator->hasValue()) {
+      return;
+    }
+
     DecodedVector decoded(*args[0], rows, true);
-    if (decoded.isConstantMapping() && decoded.isNullAt(0)) {
+    if (decoded.isConstantMapping() && decoded.isNullAt(rows.begin())) {
       // nothing to do; all values are nulls
       return;
     }
 
     const auto* indices = decoded.indices();
     const auto* baseVector = decoded.base();
-    auto* accumulator = value<SingleValueAccumulator>(group);
     // Find the first non-null value.
     rows.testSelected([&](vector_size_t i) {
       if (!decoded.isNullAt(i)) {
@@ -254,7 +260,12 @@ class NonNumericArbitrary : public exec::Aggregate {
   }
 };
 
-exec::AggregateRegistrationResult registerArbitrary(const std::string& name) {
+} // namespace
+
+void registerArbitraryAggregate(
+    const std::string& prefix,
+    bool withCompanionFunctions,
+    bool overwrite) {
   std::vector<std::shared_ptr<exec::AggregateFunctionSignature>> signatures{
       exec::AggregateFunctionSignatureBuilder()
           .typeVariable("T")
@@ -263,10 +274,11 @@ exec::AggregateRegistrationResult registerArbitrary(const std::string& name) {
           .argumentType("T")
           .build()};
 
-  return exec::registerAggregateFunction(
-      name,
+  std::vector<std::string> names = {prefix + kArbitrary, prefix + kAnyValue};
+  exec::registerAggregateFunction(
+      names,
       std::move(signatures),
-      [name](
+      [name = names.front()](
           core::AggregationNode::Step step,
           const std::vector<TypePtr>& argTypes,
           const TypePtr& /*resultType*/,
@@ -291,10 +303,17 @@ exec::AggregateRegistrationResult registerArbitrary(const std::string& name) {
             return std::make_unique<ArbitraryAggregate<double>>(inputType);
           case TypeKind::TIMESTAMP:
             return std::make_unique<ArbitraryAggregate<Timestamp>>(inputType);
+          case TypeKind::VARBINARY:
+            [[fallthrough]];
           case TypeKind::VARCHAR:
+            [[fallthrough]];
           case TypeKind::ARRAY:
+            [[fallthrough]];
           case TypeKind::MAP:
+            [[fallthrough]];
           case TypeKind::ROW:
+            [[fallthrough]];
+          case TypeKind::UNKNOWN:
             return std::make_unique<NonNumericArbitrary>(inputType);
           default:
             VELOX_FAIL(
@@ -302,13 +321,10 @@ exec::AggregateRegistrationResult registerArbitrary(const std::string& name) {
                 name,
                 inputType->kindName());
         }
-      });
-}
-
-} // namespace
-
-void registerArbitraryAggregate(const std::string& prefix) {
-  registerArbitrary(prefix + kArbitrary);
+      },
+      {false /*orderSensitive*/},
+      withCompanionFunctions,
+      overwrite);
 }
 
 } // namespace facebook::velox::aggregate::prestosql

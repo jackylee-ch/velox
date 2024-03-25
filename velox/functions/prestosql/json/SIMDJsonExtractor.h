@@ -20,16 +20,15 @@
 
 #include "folly/Range.h"
 #include "folly/dynamic.h"
-#include "simdjson/singleheader/simdjson.h"
-
 #include "velox/common/base/Exceptions.h"
 #include "velox/functions/prestosql/json/JsonPathTokenizer.h"
+#include "velox/functions/prestosql/json/SIMDJsonUtil.h"
 #include "velox/type/StringView.h"
 
 namespace facebook::velox::functions {
 
 template <typename TConsumer>
-bool simdJsonExtract(
+simdjson::error_code simdJsonExtract(
     const velox::StringView& json,
     const velox::StringView& path,
     TConsumer&& consumer);
@@ -41,7 +40,7 @@ using JsonVector = std::vector<simdjson::ondemand::value>;
 class SIMDJsonExtractor {
  public:
   template <typename TConsumer>
-  void extract(
+  simdjson::error_code extract(
       simdjson::ondemand::value& json,
       TConsumer& consumer,
       size_t tokenStartIndex = 0);
@@ -51,14 +50,12 @@ class SIMDJsonExtractor {
     return tokens_.empty();
   }
 
-  simdjson::ondemand::document parse(const simdjson::padded_string& json);
-
- private:
   // Use this method to get an instance of SIMDJsonExtractor given a JSON path.
   // Given the nature of the cache, it's important this is only used by
   // simdJsonExtract.
   static SIMDJsonExtractor& getInstance(folly::StringPiece path);
 
+ private:
   // Shouldn't instantiate directly - use getInstance().
   explicit SIMDJsonExtractor(const std::string& path) {
     if (!tokenize(path)) {
@@ -72,26 +69,20 @@ class SIMDJsonExtractor {
   static const uint32_t kMaxCacheSize{32};
 
   std::vector<std::string> tokens_;
-
-  template <typename TConsumer>
-  friend bool facebook::velox::functions::simdJsonExtract(
-      const velox::StringView& json,
-      const velox::StringView& path,
-      TConsumer&& consumer);
 };
 
-void extractObject(
+simdjson::error_code extractObject(
     simdjson::ondemand::value& jsonObj,
     const std::string& key,
     std::optional<simdjson::ondemand::value>& ret);
 
-void extractArray(
+simdjson::error_code extractArray(
     simdjson::ondemand::value& jsonValue,
     const std::string& index,
     std::optional<simdjson::ondemand::value>& ret);
 
 template <typename TConsumer>
-void SIMDJsonExtractor::extract(
+simdjson::error_code SIMDJsonExtractor::extract(
     simdjson::ondemand::value& json,
     TConsumer& consumer,
     size_t tokenStartIndex) {
@@ -103,36 +94,37 @@ void SIMDJsonExtractor::extract(
        tokenIndex++) {
     auto& token = tokens_[tokenIndex];
     if (input.type() == simdjson::ondemand::json_type::object) {
-      extractObject(input, token, result);
+      SIMDJSON_TRY(extractObject(input, token, result));
     } else if (input.type() == simdjson::ondemand::json_type::array) {
       if (token == "*") {
         for (auto child : input.get_array()) {
           if (tokenIndex == tokens_.size() - 1) {
             // If this is the last token in the path, consume each element in
             // the array.
-            consumer(child.value());
+            SIMDJSON_TRY(consumer(child.value()));
           } else {
             // If not, then recursively call the extract function on each
             // element in the array.
-            extract(child.value(), consumer, tokenIndex + 1);
+            SIMDJSON_TRY(extract(child.value(), consumer, tokenIndex + 1));
           }
         }
 
-        return;
+        return simdjson::SUCCESS;
       } else {
-        extractArray(input, token, result);
+        SIMDJSON_TRY(extractArray(input, token, result));
       }
     }
     if (!result) {
-      return;
+      return simdjson::SUCCESS;
     }
 
     input = result.value();
     result.reset();
   }
 
-  consumer(input);
+  return consumer(input);
 }
+
 } // namespace detail
 
 /**
@@ -150,43 +142,33 @@ void SIMDJsonExtractor::extract(
  *                  Note that once consumer returns, it should be assumed that
  *                  the argument passed in is no longer valid, so do not attempt
  *                  to store it as is in the consumer.
- * @return Return true on success.
- *         If any errors are encountered parsing the JSON, returns false.
+ * @return Return simdjson::SUCCESS on success.
+ *         If any errors are encountered parsing the JSON, returns the error.
  */
 
 template <typename TConsumer>
-bool simdJsonExtract(
+simdjson::error_code simdJsonExtract(
     const velox::StringView& json,
     const velox::StringView& path,
     TConsumer&& consumer) {
-  try {
-    // If extractor fails to parse the path, this will throw a VeloxUserError,
-    // and we want to let this exception bubble up to the client. We only catch
-    // JSON parsing failures (in which cases we return folly::none instead of
-    // throw).
-    auto& extractor = detail::SIMDJsonExtractor::getInstance(path);
-    simdjson::padded_string paddedJson(json.data(), json.size());
-    simdjson::ondemand::document jsonDoc = extractor.parse(paddedJson);
+  // If extractor fails to parse the path, this will throw a VeloxUserError, and
+  // we want to let this exception bubble up to the client.
+  auto& extractor = detail::SIMDJsonExtractor::getInstance(path);
+  simdjson::padded_string paddedJson(json.data(), json.size());
+  SIMDJSON_ASSIGN_OR_RAISE(auto jsonDoc, simdjsonParse(paddedJson));
 
-    if (extractor.isRootOnlyPath()) {
-      // If the path is just to return the original object, call consumer on the
-      // document.  Note, we cannot convert this to a value as this is not
-      // supported if the object is a scalar.
-      consumer(jsonDoc);
-    } else {
-      auto value = jsonDoc.get_value().value();
-      extractor.extract(value, std::forward<TConsumer>(consumer));
-    }
-  } catch (const simdjson::simdjson_error&) {
-    // simdjson might throw a conversion error while parsing the input JSON.
-    return false;
+  if (extractor.isRootOnlyPath()) {
+    // If the path is just to return the original object, call consumer on the
+    // document.  Note, we cannot convert this to a value as this is not
+    // supported if the object is a scalar.
+    return consumer(jsonDoc);
   }
-
-  return true;
+  SIMDJSON_ASSIGN_OR_RAISE(auto value, jsonDoc.get_value());
+  return extractor.extract(value, std::forward<TConsumer>(consumer));
 }
 
 template <typename TConsumer>
-bool simdJsonExtract(
+simdjson::error_code simdJsonExtract(
     const std::string& json,
     const std::string& path,
     TConsumer&& consumer) {

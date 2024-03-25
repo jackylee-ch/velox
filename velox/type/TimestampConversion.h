@@ -17,6 +17,7 @@
 #pragma once
 
 #include <cstdint>
+#include "velox/common/base/Status.h"
 #include "velox/type/Timestamp.h"
 
 namespace facebook::velox::util {
@@ -55,20 +56,29 @@ bool isValidDayOfYear(int32_t year, int32_t dayOfYear);
 // Returns max day of month for inputted month of inputted year
 int32_t getMaxDayOfMonth(int32_t year, int32_t month);
 
+/// Computes the last day of month since unix epoch (1970-01-01).
+/// Returns UserError status if the date is invalid.
+Status lastDayOfMonthSinceEpochFromDate(const std::tm& dateTime, int64_t& out);
+
 /// Date conversions.
 
-/// Returns the (signed) number of days since unix epoch (1970-01-01).
-/// Throws VeloxUserError if the date is invalid.
-int64_t daysSinceEpochFromDate(int32_t year, int32_t month, int32_t day);
+/// Computes the (signed) number of days since unix epoch (1970-01-01).
+/// Returns UserError status if the date is invalid.
+Status
+daysSinceEpochFromDate(int32_t year, int32_t month, int32_t day, int64_t& out);
 
-/// Returns the (signed) number of days since unix epoch (1970-01-01).
-int64_t daysSinceEpochFromWeekDate(
+/// Computes the (signed) number of days since unix epoch (1970-01-01).
+/// Returns UserError status if the date is invalid.
+Status daysSinceEpochFromWeekDate(
     int32_t weekYear,
     int32_t weekOfYear,
-    int32_t dayOfWeek);
+    int32_t dayOfWeek,
+    int64_t& out);
 
-/// Returns the (signed) number of days since unix epoch (1970-01-01).
-int64_t daysSinceEpochFromDayOfYear(int32_t year, int32_t dayOfYear);
+/// Computes the (signed) number of days since unix epoch (1970-01-01).
+/// Returns UserError status if the date is invalid.
+Status
+daysSinceEpochFromDayOfYear(int32_t year, int32_t dayOfYear, int64_t& out);
 
 /// Returns the (signed) number of days since unix epoch (1970-01-01), following
 /// the "YYYY-MM-DD" format (ISO 8601). ' ', '/' and '\' are also acceptable
@@ -82,8 +92,8 @@ inline int64_t fromDateString(const StringView& str) {
 }
 
 /// Cast string to date.
-/// When isNonStandardCast = false, only support "[+-]YYYY-MM-DD" format.
-/// When isNonStandardCast = true, supported date formats include:
+/// When isIso8601 = true, only support "[+-]YYYY-MM-DD" format (ISO 8601).
+/// When isIso8601 = false, supported date formats include:
 ///
 /// `[+-]YYYY*`
 /// `[+-]YYYY*-[M]M`
@@ -93,12 +103,10 @@ inline int64_t fromDateString(const StringView& str) {
 /// `[+-]YYYY*-[M]M-[D]DT*`
 ///
 /// Throws VeloxUserError if the format or date is invalid.
-int32_t castFromDateString(const char* buf, size_t len, bool isNonStandardCast);
+int32_t castFromDateString(const char* buf, size_t len, bool isIso8601);
 
-inline int32_t castFromDateString(
-    const StringView& str,
-    bool isNonStandardCast) {
-  return castFromDateString(str.data(), str.size(), isNonStandardCast);
+inline int32_t castFromDateString(const StringView& str, bool isIso8601) {
+  return castFromDateString(str.data(), str.size(), isIso8601);
 }
 
 // Extracts the day of the week from the number of days since epoch

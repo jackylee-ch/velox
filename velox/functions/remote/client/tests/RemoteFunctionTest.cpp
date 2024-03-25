@@ -23,8 +23,8 @@
 #include "velox/common/base/Exceptions.h"
 #include "velox/common/base/tests/GTestUtils.h"
 #include "velox/functions/Registerer.h"
+#include "velox/functions/lib/CheckedArithmetic.h"
 #include "velox/functions/prestosql/Arithmetic.h"
-#include "velox/functions/prestosql/CheckedArithmetic.h"
 #include "velox/functions/prestosql/StringFunctions.h"
 #include "velox/functions/prestosql/tests/utils/FunctionBaseTest.h"
 #include "velox/functions/remote/client/Remote.h"
@@ -180,6 +180,6 @@ VELOX_INSTANTIATE_TEST_SUITE_P(
 
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
-  folly::init(&argc, &argv, false);
+  folly::Init init{&argc, &argv, false};
   return RUN_ALL_TESTS();
 }

@@ -13,11 +13,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include "simdjson/singleheader/simdjson.h"
+
+#pragma once
+
 #include "velox/functions/Macros.h"
 #include "velox/functions/UDFOutputString.h"
 #include "velox/functions/prestosql/json/JsonPathTokenizer.h"
 #include "velox/functions/prestosql/json/SIMDJsonExtractor.h"
+#include "velox/functions/prestosql/json/SIMDJsonWrapper.h"
 #include "velox/functions/prestosql/types/JsonType.h"
 
 namespace facebook::velox::functions {
@@ -78,8 +81,8 @@ struct SIMDJsonArrayContainsFunction {
       return false;
     }
 
-    try {
-      for (auto&& v : ctx.jsonDoc) {
+    for (auto&& v : ctx.jsonDoc) {
+      try {
         if constexpr (std::is_same_v<TInput, bool>) {
           if (v.type() == simdjson::ondemand::json_type::boolean &&
               v.get_bool() == value) {
@@ -88,12 +91,9 @@ struct SIMDJsonArrayContainsFunction {
           }
         } else if constexpr (std::is_same_v<TInput, int64_t>) {
           if (v.type() == simdjson::ondemand::json_type::number &&
-              ((v.get_number_type() ==
-                    simdjson::ondemand::number_type::signed_integer &&
-                v.get_int64() == value) ||
-               (v.get_number_type() ==
-                    simdjson::ondemand::number_type::unsigned_integer &&
-                v.get_uint64() == value))) {
+              v.get_number_type() ==
+                  simdjson::ondemand::number_type::signed_integer &&
+              v.get_int64() == value) {
             result = true;
             break;
           }
@@ -115,10 +115,23 @@ struct SIMDJsonArrayContainsFunction {
             }
           }
         }
+      } catch (const simdjson::simdjson_error& e) {
+        // For bool/int64_t/double type, "get_bool()/get_int64()/get_double()"
+        // may throw an exception if the conversion of json value to the
+        // specified type failed, and the corresponding error code is
+        // "INCORRECT_TYPE" or "NUMBER_ERROR".
+        // If there are multiple json values in the json array, and some of them
+        // cannot be converted to the type of input `value`, it should not
+        // return null directly. It should continue to judge whether there is a
+        // json value that matches the input value, e.g.
+        // jsonArrayContains("[truet, false]", false) => true.
+        if (e.error() != simdjson::INCORRECT_TYPE &&
+            e.error() != simdjson::NUMBER_ERROR) {
+          return false;
+        }
       }
-    } catch (const simdjson::simdjson_error&) {
-      return false;
     }
+
     return true;
   }
 };
@@ -162,6 +175,14 @@ struct SIMDJsonExtractScalarFunction {
       out_type<Varchar>& result,
       const arg_type<Json>& json,
       const arg_type<Varchar>& jsonPath) {
+    return callImpl(result, json, jsonPath) == simdjson::SUCCESS;
+  }
+
+ private:
+  FOLLY_ALWAYS_INLINE bool callImpl(
+      out_type<Varchar>& result,
+      const arg_type<Json>& json,
+      const arg_type<Varchar>& jsonPath) {
     bool resultPopulated = false;
     std::optional<std::string> resultStr;
     auto consumer = [&resultStr, &resultPopulated](auto& v) {
@@ -169,38 +190,41 @@ struct SIMDJsonExtractScalarFunction {
         // We should just get a single value, if we see multiple, it's an error
         // and we should return null.
         resultStr = std::nullopt;
-        return;
+        return simdjson::SUCCESS;
       }
 
       resultPopulated = true;
 
-      switch (v.type()) {
-        case simdjson::ondemand::json_type::boolean:
-          resultStr = v.get_bool().value() ? "true" : "false";
+      SIMDJSON_ASSIGN_OR_RAISE(auto vtype, v.type());
+      switch (vtype) {
+        case simdjson::ondemand::json_type::boolean: {
+          SIMDJSON_ASSIGN_OR_RAISE(bool vbool, v.get_bool());
+          resultStr = vbool ? "true" : "false";
           break;
-        case simdjson::ondemand::json_type::string:
-          resultStr = v.get_string().value();
+        }
+        case simdjson::ondemand::json_type::string: {
+          SIMDJSON_ASSIGN_OR_RAISE(resultStr, v.get_string());
           break;
+        }
         case simdjson::ondemand::json_type::object:
         case simdjson::ondemand::json_type::array:
         case simdjson::ondemand::json_type::null:
           // Do nothing.
           break;
-        default:
-          resultStr = simdjson::to_json_string(v).value();
+        default: {
+          SIMDJSON_ASSIGN_OR_RAISE(resultStr, simdjson::to_json_string(v));
+        }
       }
+      return simdjson::SUCCESS;
     };
 
-    if (!simdJsonExtract(json, jsonPath, consumer)) {
-      // If there's an error parsing the JSON, return null.
-      return false;
-    }
+    SIMDJSON_TRY(simdJsonExtract(json, jsonPath, consumer));
 
     if (resultStr.has_value()) {
       result.copy_from(*resultStr);
-      return true;
+      return simdjson::SUCCESS;
     } else {
-      return false;
+      return simdjson::NO_SUCH_FIELD;
     }
   }
 };
@@ -210,6 +234,14 @@ struct SIMDJsonExtractFunction {
   VELOX_DEFINE_FUNCTION_TYPES(T);
 
   bool call(
+      out_type<Json>& result,
+      const arg_type<Json>& json,
+      const arg_type<Varchar>& jsonPath) {
+    return callImpl(result, json, jsonPath) == simdjson::SUCCESS;
+  }
+
+ private:
+  simdjson::error_code callImpl(
       out_type<Json>& result,
       const arg_type<Json>& json,
       const arg_type<Varchar>& jsonPath) {
@@ -224,41 +256,42 @@ struct SIMDJsonExtractFunction {
       // We could just convert v to a string using to_json_string directly, but
       // in that case the JSON wouldn't be parsed (it would just return the
       // contents directly) and we might miss invalid JSON.
-      switch (v.type()) {
-        case simdjson::ondemand::json_type::object:
-          results += simdjson::to_json_string(v.get_object()).value();
+      SIMDJSON_ASSIGN_OR_RAISE(auto vtype, v.type());
+      switch (vtype) {
+        case simdjson::ondemand::json_type::object: {
+          SIMDJSON_ASSIGN_OR_RAISE(
+              auto jsonStr, simdjson::to_json_string(v.get_object()));
+          results += jsonStr;
           break;
-        case simdjson::ondemand::json_type::array:
-          results += simdjson::to_json_string(v.get_array()).value();
+        }
+        case simdjson::ondemand::json_type::array: {
+          SIMDJSON_ASSIGN_OR_RAISE(
+              auto jsonStr, simdjson::to_json_string(v.get_array()));
+          results += jsonStr;
           break;
+        }
         case simdjson::ondemand::json_type::string:
         case simdjson::ondemand::json_type::number:
-        case simdjson::ondemand::json_type::boolean:
-          results += simdjson::to_json_string(v).value();
+        case simdjson::ondemand::json_type::boolean: {
+          SIMDJSON_ASSIGN_OR_RAISE(auto jsonStr, simdjson::to_json_string(v));
+          results += jsonStr;
           break;
+        }
         case simdjson::ondemand::json_type::null:
           results += kNullString;
           break;
       }
+      return simdjson::SUCCESS;
     };
 
-    if (!simdJsonExtract(json, jsonPath, consumer)) {
-      // If there's an error parsing the JSON, return null.
-      return false;
-    }
+    SIMDJSON_TRY(simdJsonExtract(json, jsonPath, consumer));
 
     if (resultSize == 0) {
       // If the path didn't map to anything in the JSON object, return null.
-      return false;
+      return simdjson::NO_SUCH_FIELD;
     }
 
     if (resultSize == 1) {
-      if (results == kNullString) {
-        // If there was only one value mapped to by the path and it was null,
-        // return null directly.
-        return false;
-      }
-
       // If there was only one value mapped to by the path, don't wrap it in an
       // array.
       result.copy_from(results);
@@ -266,7 +299,7 @@ struct SIMDJsonExtractFunction {
       // Add the square brackets to make it a valid JSON array.
       result.copy_from("[" + results + "]");
     }
-    return true;
+    return simdjson::SUCCESS;
   }
 };
 
@@ -275,6 +308,14 @@ struct SIMDJsonSizeFunction {
   VELOX_DEFINE_FUNCTION_TYPES(T);
 
   FOLLY_ALWAYS_INLINE bool call(
+      int64_t& result,
+      const arg_type<Json>& json,
+      const arg_type<Varchar>& jsonPath) {
+    return callImpl(result, json, jsonPath) == simdjson::SUCCESS;
+  }
+
+ private:
+  FOLLY_ALWAYS_INLINE simdjson::error_code callImpl(
       int64_t& result,
       const arg_type<Json>& json,
       const arg_type<Varchar>& jsonPath) {
@@ -287,13 +328,16 @@ struct SIMDJsonSizeFunction {
         // We only need the size of the actual object if there's only one
         // returned, if multiple are returned we use the number of objects
         // returned instead.
-        switch (v.type()) {
-          case simdjson::ondemand::json_type::object:
-            singleResultSize = v.count_fields().value();
+        SIMDJSON_ASSIGN_OR_RAISE(auto vtype, v.type());
+        switch (vtype) {
+          case simdjson::ondemand::json_type::object: {
+            SIMDJSON_ASSIGN_OR_RAISE(singleResultSize, v.count_fields());
             break;
-          case simdjson::ondemand::json_type::array:
-            singleResultSize = v.count_elements().value();
+          }
+          case simdjson::ondemand::json_type::array: {
+            SIMDJSON_ASSIGN_OR_RAISE(singleResultSize, v.count_elements());
             break;
+          }
           case simdjson::ondemand::json_type::string:
           case simdjson::ondemand::json_type::number:
           case simdjson::ondemand::json_type::boolean:
@@ -302,21 +346,19 @@ struct SIMDJsonSizeFunction {
             break;
         }
       }
+      return simdjson::SUCCESS;
     };
 
-    if (!simdJsonExtract(json, jsonPath, consumer)) {
-      // If there's an error parsing the JSON, return null.
-      return false;
-    }
+    SIMDJSON_TRY(simdJsonExtract(json, jsonPath, consumer));
 
     if (resultCount == 0) {
       // If the path didn't map to anything in the JSON object, return null.
-      return false;
+      return simdjson::NO_SUCH_FIELD;
     }
 
     result = resultCount == 1 ? singleResultSize : resultCount;
 
-    return true;
+    return simdjson::SUCCESS;
   }
 };
 

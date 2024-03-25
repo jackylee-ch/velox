@@ -31,6 +31,10 @@ using namespace facebook::velox::test;
 
 class UnsafeRowFuzzTests : public ::testing::Test {
  public:
+  static void SetUpTestCase() {
+    memory::MemoryManager::testingSetInstance({});
+  }
+
   UnsafeRowFuzzTests() {
     clearBuffers();
   }
@@ -48,7 +52,6 @@ class UnsafeRowFuzzTests : public ::testing::Test {
     VectorFuzzer::Options opts;
     opts.vectorSize = kNumBuffers;
     opts.nullRatio = 0.1;
-    opts.containerHasNulls = false;
     opts.dictionaryHasNulls = false;
     opts.stringVariableLength = true;
     opts.stringLength = 20;
@@ -91,7 +94,7 @@ class UnsafeRowFuzzTests : public ::testing::Test {
   std::array<char[kBufferSize], kNumBuffers> buffers_{};
 
   std::shared_ptr<memory::MemoryPool> pool_ =
-      memory::addDefaultLeafMemoryPool();
+      memory::memoryManager()->addLeafPool();
 };
 
 TEST_F(UnsafeRowFuzzTests, fast) {
@@ -107,6 +110,8 @@ TEST_F(UnsafeRowFuzzTests, fast) {
       VARCHAR(),
       VARBINARY(),
       UNKNOWN(),
+      DECIMAL(20, 2),
+      DECIMAL(12, 4),
       // Arrays.
       ARRAY(BOOLEAN()),
       ARRAY(TINYINT()),
@@ -118,6 +123,8 @@ TEST_F(UnsafeRowFuzzTests, fast) {
       ARRAY(VARCHAR()),
       ARRAY(VARBINARY()),
       ARRAY(UNKNOWN()),
+      ARRAY(DECIMAL(20, 2)),
+      ARRAY(DECIMAL(12, 4)),
       // Nested arrays.
       ARRAY(ARRAY(INTEGER())),
       ARRAY(ARRAY(BIGINT())),
@@ -127,6 +134,8 @@ TEST_F(UnsafeRowFuzzTests, fast) {
       MAP(BIGINT(), REAL()),
       MAP(BIGINT(), BIGINT()),
       MAP(BIGINT(), VARCHAR()),
+      MAP(BIGINT(), DECIMAL(20, 2)),
+      MAP(BIGINT(), DECIMAL(12, 4)),
       MAP(INTEGER(), MAP(BIGINT(), DOUBLE())),
       MAP(VARCHAR(), BOOLEAN()),
       MAP(INTEGER(), MAP(BIGINT(), ARRAY(REAL()))),
@@ -137,7 +146,13 @@ TEST_F(UnsafeRowFuzzTests, fast) {
       ARRAY(DATE()),
       MAP(DATE(), ARRAY(TIMESTAMP())),
       // Structs.
-      ROW({BOOLEAN(), INTEGER(), TIMESTAMP(), VARCHAR(), ARRAY(BIGINT())}),
+      ROW(
+          {BOOLEAN(),
+           INTEGER(),
+           TIMESTAMP(),
+           DECIMAL(20, 2),
+           VARCHAR(),
+           ARRAY(BIGINT())}),
       ROW(
           {BOOLEAN(),
            ROW({INTEGER(), TIMESTAMP()}),

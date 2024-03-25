@@ -176,8 +176,14 @@ class FirstAggregate : public FirstLastAggregateBase<numeric, TData> {
     this->decodeIntermediateRows(rows, args);
 
     rows.applyToSelected([&](vector_size_t i) {
-      updateValue(
-          this->decodedIntermediates_.index(i), groups[i], this->decodedValue_);
+      if (!this->decodedIntermediates_.isNullAt(i)) {
+        updateValue(
+            this->decodedIntermediates_.index(i),
+            groups[i],
+            this->decodedValue_);
+      } else {
+        updateNull(groups[i]);
+      }
     });
   }
 
@@ -201,14 +207,36 @@ class FirstAggregate : public FirstLastAggregateBase<numeric, TData> {
     this->decodeIntermediateRows(rows, args);
 
     rows.testSelected([&](vector_size_t i) {
-      return updateValue(
-          this->decodedIntermediates_.index(i), group, this->decodedValue_);
+      if (!this->decodedIntermediates_.isNullAt(i)) {
+        return updateValue(
+            this->decodedIntermediates_.index(i), group, this->decodedValue_);
+      } else {
+        return updateNull(group);
+      }
     });
   }
 
  private:
   using TAccumulator =
       typename FirstLastAggregateBase<numeric, TData>::TAccumulator;
+
+  bool updateNull(char* group) {
+    auto accumulator = Aggregate::value<TAccumulator>(group);
+    if (accumulator->has_value()) {
+      return false;
+    }
+
+    if constexpr (ignoreNull) {
+      return true;
+    } else {
+      if constexpr (numeric) {
+        *accumulator = TData();
+      } else {
+        *accumulator = SingleValueAccumulator();
+      }
+      return false;
+    }
+  }
 
   // If we found a valid value, set to accumulator, then skip remaining rows in
   // group.
@@ -250,7 +278,9 @@ class FirstAggregate : public FirstLastAggregateBase<numeric, TData> {
       Aggregate::clearNull(group);
       *accumulator = SingleValueAccumulator();
       accumulator->value().write(
-          decodedVector.base(), index, Aggregate::allocator_);
+          decodedVector.base(),
+          decodedVector.index(index),
+          Aggregate::allocator_);
       return false;
     }
 
@@ -289,8 +319,14 @@ class LastAggregate : public FirstLastAggregateBase<numeric, TData> {
     this->decodeIntermediateRows(rows, args);
 
     rows.applyToSelected([&](vector_size_t i) {
-      updateValue(
-          this->decodedIntermediates_.index(i), groups[i], this->decodedValue_);
+      if (!this->decodedIntermediates_.isNullAt(i)) {
+        updateValue(
+            this->decodedIntermediates_.index(i),
+            groups[i],
+            this->decodedValue_);
+      } else {
+        updateNull(groups[i]);
+      }
     });
   }
 
@@ -313,14 +349,31 @@ class LastAggregate : public FirstLastAggregateBase<numeric, TData> {
     this->decodeIntermediateRows(rows, args);
 
     rows.applyToSelected([&](vector_size_t i) {
-      updateValue(
-          this->decodedIntermediates_.index(i), group, this->decodedValue_);
+      if (!this->decodedIntermediates_.isNullAt(i)) {
+        updateValue(
+            this->decodedIntermediates_.index(i), group, this->decodedValue_);
+      } else {
+        updateNull(group);
+      }
     });
   }
 
  private:
   using TAccumulator =
       typename FirstLastAggregateBase<numeric, TData>::TAccumulator;
+
+  void updateNull(char* group) {
+    auto accumulator = Aggregate::value<TAccumulator>(group);
+
+    if constexpr (!ignoreNull) {
+      Aggregate::setNull(group);
+      if constexpr (numeric) {
+        *accumulator = TData();
+      } else {
+        *accumulator = SingleValueAccumulator();
+      }
+    }
+  }
 
   void updateValue(
       vector_size_t index,
@@ -357,7 +410,9 @@ class LastAggregate : public FirstLastAggregateBase<numeric, TData> {
       }
       *accumulator = SingleValueAccumulator();
       accumulator->value().write(
-          decodedVector.base(), index, Aggregate::allocator_);
+          decodedVector.base(),
+          decodedVector.index(index),
+          Aggregate::allocator_);
       return;
     }
 
@@ -374,7 +429,10 @@ class LastAggregate : public FirstLastAggregateBase<numeric, TData> {
 } // namespace
 
 template <template <bool B1, typename T, bool B2> class TClass, bool ignoreNull>
-AggregateRegistrationResult registerFirstLast(const std::string& name) {
+AggregateRegistrationResult registerFirstLast(
+    const std::string& name,
+    bool withCompanionFunctions,
+    bool overwrite) {
   std::vector<std::shared_ptr<AggregateFunctionSignature>> signatures = {
       AggregateFunctionSignatureBuilder()
           .typeVariable("T")
@@ -431,9 +489,11 @@ AggregateRegistrationResult registerFirstLast(const std::string& name) {
           case TypeKind::HUGEINT:
             return std::make_unique<TClass<ignoreNull, int128_t, true>>(
                 resultType);
+          case TypeKind::VARBINARY:
           case TypeKind::VARCHAR:
           case TypeKind::ARRAY:
           case TypeKind::MAP:
+          case TypeKind::ROW:
             return std::make_unique<TClass<ignoreNull, ComplexType, false>>(
                 resultType);
           default:
@@ -442,14 +502,23 @@ AggregateRegistrationResult registerFirstLast(const std::string& name) {
                 name,
                 inputType->toString());
         }
-      });
+      },
+      withCompanionFunctions,
+      overwrite);
 }
 
-void registerFirstLastAggregates(const std::string& prefix) {
-  registerFirstLast<FirstAggregate, false>(prefix + "first");
-  registerFirstLast<FirstAggregate, true>(prefix + "first_ignore_null");
-  registerFirstLast<LastAggregate, false>(prefix + "last");
-  registerFirstLast<LastAggregate, true>(prefix + "last_ignore_null");
+void registerFirstLastAggregates(
+    const std::string& prefix,
+    bool withCompanionFunctions,
+    bool overwrite) {
+  registerFirstLast<FirstAggregate, false>(
+      prefix + "first", withCompanionFunctions, overwrite);
+  registerFirstLast<FirstAggregate, true>(
+      prefix + "first_ignore_null", withCompanionFunctions, overwrite);
+  registerFirstLast<LastAggregate, false>(
+      prefix + "last", withCompanionFunctions, overwrite);
+  registerFirstLast<LastAggregate, true>(
+      prefix + "last_ignore_null", withCompanionFunctions, overwrite);
 }
 
 } // namespace facebook::velox::functions::aggregate::sparksql

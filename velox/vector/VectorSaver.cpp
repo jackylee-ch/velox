@@ -416,7 +416,9 @@ void writeRowVector(const BaseVector& vector, std::ostream& out) {
   // Nulls buffer.
   writeOptionalBuffer(vector.nulls(), out);
 
-  auto rowVector = vector.as<RowVector>();
+  const auto* rowVector = vector.as<RowVector>();
+  VELOX_CHECK_NOT_NULL(
+      rowVector, "Expected a RowVector, got: {}", vector.toString());
 
   // Child vectors.
   auto numChildren = rowVector->childrenSize();
@@ -539,11 +541,15 @@ class LoadedVectorShim : public VectorLoader {
  public:
   explicit LoadedVectorShim(VectorPtr vector) : vector_(vector) {}
 
-  void loadInternal(RowSet /*rowSet*/, ValueHook* /*hook*/, VectorPtr* result)
-      override {
+  void loadInternal(
+      RowSet /*rowSet*/,
+      ValueHook* /*hook*/,
+      vector_size_t resultSize,
+      VectorPtr* result) override {
     VELOX_CHECK(
         vector_ != nullptr, "This lazy vector should not have been loaded.");
     *result = vector_;
+    VELOX_CHECK_EQ((*result)->size(), resultSize);
   }
 
  private:
@@ -773,3 +779,10 @@ SelectivityVector restoreSelectivityVector(std::istream& in) {
 }
 
 } // namespace facebook::velox
+
+template <>
+struct fmt::formatter<facebook::velox::Encoding> : formatter<int> {
+  auto format(facebook::velox::Encoding s, format_context& ctx) {
+    return formatter<int>::format(static_cast<int>(s), ctx);
+  }
+};

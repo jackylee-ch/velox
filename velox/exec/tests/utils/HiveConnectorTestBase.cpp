@@ -33,7 +33,10 @@ void HiveConnectorTestBase::SetUp() {
   auto hiveConnector =
       connector::getConnectorFactory(
           connector::hive::HiveConnectorFactory::kHiveConnectorName)
-          ->newConnector(kHiveConnectorId, nullptr, ioExecutor_.get());
+          ->newConnector(
+              kHiveConnectorId,
+              std::make_shared<core::MemConfig>(),
+              ioExecutor_.get());
   connector::registerConnector(hiveConnector);
 }
 
@@ -43,6 +46,16 @@ void HiveConnectorTestBase::TearDown() {
   ioExecutor_.reset();
   connector::unregisterConnector(kHiveConnectorId);
   OperatorTestBase::TearDown();
+}
+
+void HiveConnectorTestBase::resetHiveConnector(
+    const std::shared_ptr<const Config>& config) {
+  connector::unregisterConnector(kHiveConnectorId);
+  auto hiveConnector =
+      connector::getConnectorFactory(
+          connector::hive::HiveConnectorFactory::kHiveConnectorName)
+          ->newConnector(kHiveConnectorId, config, ioExecutor_.get());
+  connector::registerConnector(hiveConnector);
 }
 
 void HiveConnectorTestBase::writeToFile(
@@ -59,7 +72,7 @@ void HiveConnectorTestBase::writeToFile(
   options.config = config;
   options.schema = vectors[0]->type();
   auto localWriteFile = std::make_unique<LocalWriteFile>(filePath, true, false);
-  auto sink = std::make_unique<dwio::common::WriteFileDataSink>(
+  auto sink = std::make_unique<dwio::common::WriteFileSink>(
       std::move(localWriteFile), filePath);
   auto childPool = rootPool_->addAggregateChild("HiveConnectorTestBase.Writer");
   options.memoryPool = childPool.get();
@@ -158,7 +171,12 @@ HiveConnectorTestBase::makeHiveConnectorSplits(
     const std::vector<std::shared_ptr<TempFilePath>>& filePaths) {
   std::vector<std::shared_ptr<connector::ConnectorSplit>> splits;
   for (auto filePath : filePaths) {
-    splits.push_back(makeHiveConnectorSplit(filePath->path));
+    splits.push_back(makeHiveConnectorSplit(
+        filePath->path,
+        filePath->fileSize(),
+        filePath->fileModifiedTime(),
+        0,
+        std::numeric_limits<uint64_t>::max()));
   }
   return splits;
 }
@@ -167,8 +185,25 @@ std::shared_ptr<connector::ConnectorSplit>
 HiveConnectorTestBase::makeHiveConnectorSplit(
     const std::string& filePath,
     uint64_t start,
+    uint64_t length,
+    int64_t splitWeight) {
+  return HiveConnectorSplitBuilder(filePath)
+      .start(start)
+      .length(length)
+      .splitWeight(splitWeight)
+      .build();
+}
+
+std::shared_ptr<connector::ConnectorSplit>
+HiveConnectorTestBase::makeHiveConnectorSplit(
+    const std::string& filePath,
+    int64_t fileSize,
+    int64_t fileModifiedTime,
+    uint64_t start,
     uint64_t length) {
   return HiveConnectorSplitBuilder(filePath)
+      .infoColumn("$file_size", fmt::format("{}", fileSize))
+      .infoColumn("$file_modified_time", fmt::format("{}", fileModifiedTime))
       .start(start)
       .length(length)
       .build();

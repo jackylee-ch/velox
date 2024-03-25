@@ -22,15 +22,16 @@ add_library(
   ArrayDistinct.cpp
   ArrayDuplicates.cpp
   ArrayIntersectExcept.cpp
-  ArrayMatch.cpp
+  ArrayAndMapMatch.cpp
   ArrayPosition.cpp
   ArrayShuffle.cpp
   ArraySort.cpp
   ArraySum.cpp
   Comparisons.cpp
-  DecimalVectorFunctions.cpp
+  DecimalFunctions.cpp
   ElementAt.cpp
   FilterFunctions.cpp
+  FindFirst.cpp
   FromUnixTime.cpp
   FromUtf8.cpp
   GreatestLeast.cpp
@@ -43,7 +44,6 @@ add_library(
   MapZipWith.cpp
   Not.cpp
   Reduce.cpp
-  Repeat.cpp
   Reverse.cpp
   RowFunction.cpp
   Sequence.cpp
@@ -56,6 +56,7 @@ add_library(
   Transform.cpp
   TransformKeys.cpp
   TransformValues.cpp
+  TypeOf.cpp
   URLFunctions.cpp
   Utf8Utils.cpp
   VectorArithmetic.cpp
@@ -85,6 +86,7 @@ endif()
 if(${VELOX_BUILD_TESTING})
   add_subdirectory(tests)
   add_subdirectory(coverage)
+  add_subdirectory(fuzzer)
 elseif(${VELOX_BUILD_TEST_UTILS})
   add_subdirectory(tests/utils)
 endif()

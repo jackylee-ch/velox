@@ -38,11 +38,11 @@ using folly::Random;
 uint64_t computeCumulativeNodeSize(
     std::unordered_map<uint32_t, uint64_t>& nodeSizes,
     const TypeWithId& type) {
-  auto totalSize = nodeSizes[type.id];
+  auto totalSize = nodeSizes[type.id()];
   for (auto i = 0; i < type.size(); i++) {
     totalSize += computeCumulativeNodeSize(nodeSizes, *type.childAt(i));
   }
-  nodeSizes[type.id] = totalSize;
+  nodeSizes[type.id()] = totalSize;
   return totalSize;
 }
 
@@ -105,6 +105,7 @@ void verifyStats(
       rowReader.getColumnSelector(),
       rowReader.getRowReaderOptions(),
       stripeInfo.offset(),
+      static_cast<int64_t>(stripeInfo.numberOfRows()),
       rowReader,
       0};
   streams.loadReadPlan();
@@ -140,8 +141,12 @@ using PopulateBatch =
 
 class ColumnWriterStatsTest : public ::testing::Test {
  protected:
+  static void SetUpTestCase() {
+    memory::MemoryManager::testingSetInstance({});
+  }
+
   void SetUp() override {
-    rootPool_ = defaultMemoryManager().addRootPool("ColumnWriterStatsTest");
+    rootPool_ = memory::memoryManager()->addRootPool("ColumnWriterStatsTest");
     leafPool_ = rootPool_->addLeafChild("ColumnWriterStatsTest");
   }
 
@@ -151,14 +156,18 @@ class ColumnWriterStatsTest : public ::testing::Test {
       const size_t repeat,
       const int32_t flatMapColId) {
     // write file to memory
-    auto sink = std::make_unique<MemorySink>(*leafPool_, 200 * 1024 * 1024);
+    auto sink = std::make_unique<MemorySink>(
+        200 * 1024 * 1024,
+        dwio::common::FileSink::Options{.pool = leafPool_.get()});
     auto sinkPtr = sink.get();
 
-    auto config = std::make_shared<Config>();
-    config->set(Config::ROW_INDEX_STRIDE, folly::to<uint32_t>(batch->size()));
+    auto config = std::make_shared<dwrf::Config>();
+    config->set(
+        dwrf::Config::ROW_INDEX_STRIDE, folly::to<uint32_t>(batch->size()));
     if (flatMapColId >= 0) {
-      config->set(Config::FLATTEN_MAP, true);
-      config->set(Config::MAP_FLAT_COLS, {folly::to<uint32_t>(flatMapColId)});
+      config->set(dwrf::Config::FLATTEN_MAP, true);
+      config->set(
+          dwrf::Config::MAP_FLAT_COLS, {folly::to<uint32_t>(flatMapColId)});
     }
     dwrf::WriterOptions options;
     options.config = config;
@@ -177,11 +186,11 @@ class ColumnWriterStatsTest : public ::testing::Test {
 
     writer.close();
 
-    std::string_view data(sinkPtr->getData(), sinkPtr->size());
+    std::string_view data(sinkPtr->data(), sinkPtr->size());
     auto readFile = std::make_shared<facebook::velox::InMemoryReadFile>(data);
     auto input = std::make_unique<BufferedInput>(readFile, *leafPool_);
 
-    ReaderOptions readerOpts{leafPool_.get()};
+    dwio::common::ReaderOptions readerOpts{leafPool_.get()};
     RowReaderOptions rowReaderOpts;
     auto reader = std::make_unique<DwrfReader>(readerOpts, std::move(input));
     return reader->createRowReader(rowReaderOpts);
@@ -527,7 +536,7 @@ TEST_F(ColumnWriterStatsTest, List) {
     auto nodeSizePerStride = populateFloatBatch(pool, &childVector, childSize);
     *vector = std::make_shared<ArrayVector>(
         &pool,
-        CppToType<Array<float>>::create(),
+        ARRAY(REAL()),
         nulls,
         size,
         offsets,
@@ -576,7 +585,7 @@ TEST_F(ColumnWriterStatsTest, Map) {
     auto nodeSizePerStride = populateFloatBatch(pool, &valueVector, childSize);
     *vector = std::make_shared<MapVector>(
         &pool,
-        CppToType<Map<int32_t, float>>::create(),
+        MAP(INTEGER(), REAL()),
         nulls,
         size,
         offsets,
@@ -630,12 +639,7 @@ TEST_F(ColumnWriterStatsTest, Struct) {
           nodeSizePerStride.push_back(floatBatchSize);
         }
         *vector = std::make_shared<RowVector>(
-            &pool,
-            CppToType<Row<float, float>>::create(),
-            nulls,
-            size,
-            children,
-            nullCount);
+            &pool, ROW({REAL(), REAL()}), nulls, size, children, nullCount);
         nodeSizePerStride.at(0) =
             nullCount + nodeSizePerStride.at(2) + nodeSizePerStride.at(3);
         nodeSizePerStride.at(1) =

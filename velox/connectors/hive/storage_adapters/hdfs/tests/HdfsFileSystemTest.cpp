@@ -15,8 +15,6 @@
  */
 #include "velox/connectors/hive/storage_adapters/hdfs/HdfsFileSystem.h"
 #include <boost/format.hpp>
-#include <connectors/hive/storage_adapters/hdfs/HdfsReadFile.h>
-#include <connectors/hive/storage_adapters/hdfs/RegisterHdfsFileSystem.h>
 #include <gmock/gmock-matchers.h>
 #include <hdfs/hdfs.h>
 #include <atomic>
@@ -24,6 +22,8 @@
 #include "HdfsMiniCluster.h"
 #include "gtest/gtest.h"
 #include "velox/common/base/tests/GTestUtils.h"
+#include "velox/connectors/hive/storage_adapters/hdfs/HdfsReadFile.h"
+#include "velox/connectors/hive/storage_adapters/hdfs/RegisterHdfsFileSystem.h"
 #include "velox/core/QueryConfig.h"
 #include "velox/exec/tests/utils/TempFilePath.h"
 
@@ -126,7 +126,9 @@ void checkReadErrorMessages(
   }
 }
 
-void verifyFailures(ReadFile* readFile) {
+void verifyFailures(hdfsFS hdfs) {
+  HdfsReadFile readFile(hdfs, destinationPath);
+  HdfsReadFile readFile2(hdfs, destinationPath);
   auto startPoint = 10 + kOneMB;
   auto size = 15 + kOneMB;
   auto endpoint = 10 + 2 * kOneMB;
@@ -150,9 +152,9 @@ void verifyFailures(ReadFile* readFile) {
            "HdfsNetworkConnectException: Connect to \"%s\" failed") %
        serverAddress % serverAddress % serverAddress)
           .str();
-  checkReadErrorMessages(readFile, offsetErrorMessage, kOneMB);
+  checkReadErrorMessages(&readFile, offsetErrorMessage, kOneMB);
   HdfsFileSystemTest::miniCluster->stop();
-  checkReadErrorMessages(readFile, readFailErrorMessage, 1);
+  checkReadErrorMessages(&readFile2, readFailErrorMessage, 1);
   try {
     auto memConfig =
         std::make_shared<const core::MemConfig>(configurationValues);
@@ -216,20 +218,14 @@ TEST_F(HdfsFileSystemTest, oneFsInstanceForOneEndpoint) {
 }
 
 TEST_F(HdfsFileSystemTest, missingFileViaFileSystem) {
-  try {
-    auto memConfig =
-        std::make_shared<const core::MemConfig>(configurationValues);
-    auto hdfsFileSystem =
-        filesystems::getFileSystem(fullDestinationPath, memConfig);
-    auto readFile = hdfsFileSystem->openFileForRead(
-        "hdfs://localhost:7777/path/that/does/not/exist");
-    FAIL() << "expected VeloxException";
-  } catch (VeloxException const& error) {
-    EXPECT_THAT(
-        error.message(),
-        testing::HasSubstr(
-            "Unable to get file path info for file: /path/that/does/not/exist. got error: FileNotFoundException: Path /path/that/does/not/exist does not exist."));
-  }
+  auto memConfig = std::make_shared<const core::MemConfig>(configurationValues);
+  auto hdfsFileSystem =
+      filesystems::getFileSystem(fullDestinationPath, memConfig);
+  VELOX_ASSERT_RUNTIME_THROW_CODE(
+      hdfsFileSystem->openFileForRead(
+          "hdfs://localhost:7777/path/that/does/not/exist"),
+      error_code::kFileNotFound,
+      "Unable to get file path info for file: /path/that/does/not/exist. got error: FileNotFoundException: Path /path/that/does/not/exist does not exist.");
 }
 
 TEST_F(HdfsFileSystemTest, missingHost) {
@@ -427,11 +423,24 @@ TEST_F(HdfsFileSystemTest, writeFlushFailures) {
       "Cannot flush HDFS file because file handle is null, file path: /a.txt");
 }
 
+TEST_F(HdfsFileSystemTest, writeWithParentDirNotExist) {
+  std::string path = "/parent/directory/that/does/not/exist/a.txt";
+  auto writeFile = openFileForWrite(path);
+  std::string data = "abcdefghijk";
+  writeFile->append(data);
+  writeFile->flush();
+  ASSERT_EQ(writeFile->size(), 0);
+  writeFile->append(data);
+  writeFile->append(data);
+  writeFile->flush();
+  writeFile->close();
+  ASSERT_EQ(writeFile->size(), data.size() * 3);
+}
+
 TEST_F(HdfsFileSystemTest, readFailures) {
   struct hdfsBuilder* builder = hdfsNewBuilder();
   hdfsBuilderSetNameNode(builder, localhost.c_str());
   hdfsBuilderSetNameNodePort(builder, stoi(hdfsPort));
   auto hdfs = hdfsBuilderConnect(builder);
-  HdfsReadFile readFile(hdfs, destinationPath);
-  verifyFailures(&readFile);
+  verifyFailures(hdfs);
 }

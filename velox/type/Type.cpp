@@ -20,7 +20,6 @@
 #include <re2/re2.h>
 #include <sstream>
 #include <typeindex>
-#include "velox/common/base/Exceptions.h"
 #include "velox/type/TimestampConversion.h"
 
 namespace std {
@@ -223,7 +222,7 @@ std::string ArrayType::toString() const {
 }
 
 const TypePtr& ArrayType::childAt(uint32_t idx) const {
-  VELOX_USER_CHECK_EQ(idx, 0, "List type should have only one child");
+  VELOX_USER_CHECK_EQ(idx, 0, "Array type should have only one child");
   return elementType();
 }
 
@@ -264,6 +263,17 @@ const TypePtr& MapType::childAt(uint32_t idx) const {
       idx);
 }
 
+const char* MapType::nameOf(uint32_t idx) const {
+  if (idx == 0) {
+    return "key";
+  } else if (idx == 1) {
+    return "value";
+  }
+  VELOX_USER_FAIL(
+      "Map type should have only two children. Tried to get name of child '{}'",
+      idx);
+}
+
 MapType::MapType(TypePtr keyType, TypePtr valueType)
     : keyType_{std::move(keyType)},
       valueType_{std::move(valueType)},
@@ -297,28 +307,49 @@ std::vector<TypeParameter> createTypeParameters(
   return parameters;
 }
 
-// Returns children names index name -> first idx of occurence.
-const folly::F14FastMap<std::string, uint32_t> createdChildrenIndex(
-    const std::vector<std::string>& names) {
-  folly::F14FastMap<std::string, uint32_t> index;
-  index.reserve(names.size());
-  for (uint32_t i = 0; i < names.size(); ++i) {
-    if (index.find(names[i]) == index.end()) {
-      index[names[i]] = i;
+std::string namesAndTypesToString(
+    const std::vector<std::string>& names,
+    const std::vector<TypePtr>& types) {
+  std::stringstream ss;
+  ss << "[names: {";
+  if (!names.empty()) {
+    for (const auto& name : names) {
+      ss << "'" << name << "', ";
     }
+    ss.seekp(-2, std::ios_base::cur);
+  } else {
+    ss << " ";
   }
-  return index;
+  ss << "}, types: {";
+  if (!types.empty()) {
+    for (const auto& type : types) {
+      ss << (type ? type->toString() : "NULL") << ", ";
+    }
+    ss.seekp(-2, std::ios_base::cur);
+  } else {
+    ss << " ";
+  }
+  ss << "}]";
+  return ss.str();
 }
+
 } // namespace
 
 RowType::RowType(std::vector<std::string>&& names, std::vector<TypePtr>&& types)
     : names_{std::move(names)},
       children_{std::move(types)},
-      parameters_{createTypeParameters(children_)},
-      // TODO: lazily initialize index on first access instead.
-      childrenIndices_{createdChildrenIndex(names_)} {
-  VELOX_USER_CHECK_EQ(
-      names_.size(), children_.size(), "Mismatch names/types sizes");
+      parameters_{createTypeParameters(children_)} {
+  VELOX_CHECK_EQ(
+      names_.size(),
+      children_.size(),
+      "Mismatch names/types sizes: {}",
+      namesAndTypesToString(names_, children_));
+  for (auto& child : children_) {
+    VELOX_CHECK_NOT_NULL(
+        child,
+        "Child types cannot be null: {}",
+        namesAndTypesToString(names_, children_));
+  }
 }
 
 uint32_t RowType::size() const {
@@ -347,20 +378,33 @@ std::string makeFieldNotFoundErrorMessage(
 }
 } // namespace
 
-// Returns type of first child with matching name.
 const TypePtr& RowType::findChild(folly::StringPiece name) const {
-  auto idx = getChildIdxIfExists(std::string(name));
-  if (idx) {
-    return children_[*idx];
+  for (uint32_t i = 0; i < names_.size(); ++i) {
+    if (names_.at(i) == name) {
+      return children_.at(i);
+    }
   }
   VELOX_USER_FAIL(makeFieldNotFoundErrorMessage(name, names_));
 }
 
-bool RowType::containsChild(std::string_view name) const {
-  return getChildIdxIfExists(std::string(name)).has_value();
+bool RowType::isOrderable() const {
+  return std::all_of(
+      children_.cbegin(), children_.cend(), [](const auto& child) {
+        return child->isOrderable();
+      });
 }
 
-// Returns index of first child with matching name.
+bool RowType::isComparable() const {
+  return std::all_of(
+      children_.cbegin(), children_.cend(), [](const auto& child) {
+        return child->isComparable();
+      });
+}
+
+bool RowType::containsChild(std::string_view name) const {
+  return std::find(names_.begin(), names_.end(), name) != names_.end();
+}
+
 uint32_t RowType::getChildIdx(const std::string& name) const {
   auto index = getChildIdxIfExists(name);
   if (!index.has_value()) {
@@ -371,9 +415,10 @@ uint32_t RowType::getChildIdx(const std::string& name) const {
 
 std::optional<uint32_t> RowType::getChildIdxIfExists(
     const std::string& name) const {
-  const auto it = childrenIndices_.find(name);
-  if (it != childrenIndices_.end()) {
-    return it->second;
+  for (uint32_t i = 0; i < names_.size(); i++) {
+    if (names_.at(i) == name) {
+      return i;
+    }
   }
   return std::nullopt;
 }
@@ -385,7 +430,7 @@ bool RowType::equivalent(const Type& other) const {
   if (!Type::hasSameTypeId(other)) {
     return false;
   }
-  auto& otherTyped = other.asRow();
+  const auto& otherTyped = other.asRow();
   if (otherTyped.size() != size()) {
     return false;
   }
@@ -398,13 +443,20 @@ bool RowType::equivalent(const Type& other) const {
 }
 
 bool RowType::equals(const Type& other) const {
-  if (!this->equivalent(other)) {
+  if (&other == this) {
+    return true;
+  }
+  if (!Type::hasSameTypeId(other)) {
     return false;
   }
-  auto& otherTyped = other.asRow();
+  const auto& otherTyped = other.asRow();
+  if (otherTyped.size() != size()) {
+    return false;
+  }
   for (size_t i = 0; i < size(); ++i) {
     // todo: case sensitivity
-    if (nameOf(i) != otherTyped.nameOf(i)) {
+    if (nameOf(i) != otherTyped.nameOf(i) ||
+        *childAt(i) != *otherTyped.childAt(i)) {
       return false;
     }
   }
@@ -514,11 +566,23 @@ bool FunctionType::equivalent(const Type& other) const {
   if (&other == this) {
     return true;
   }
+
   if (!Type::hasSameTypeId(other)) {
     return false;
   }
+
   auto& otherTyped = *reinterpret_cast<const FunctionType*>(&other);
-  return children_ == otherTyped.children_;
+  if (children_.size() != otherTyped.size()) {
+    return false;
+  }
+
+  for (auto i = 0; i < children_.size(); ++i) {
+    if (!children_.at(i)->equivalent(*otherTyped.children_.at(i))) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 std::string FunctionType::toString() const {
@@ -657,25 +721,21 @@ std::shared_ptr<const RowType> ROW(
 }
 
 std::shared_ptr<const RowType> ROW(std::vector<TypePtr>&& types) {
-  std::vector<std::string> names;
-  names.reserve(types.size());
-  for (auto& p : types) {
-    names.push_back("");
-  }
+  std::vector<std::string> names(types.size(), "");
   return TypeFactory<TypeKind::ROW>::create(std::move(names), std::move(types));
 }
 
 std::shared_ptr<const MapType> MAP(TypePtr keyType, TypePtr valType) {
   return std::make_shared<const MapType>(
       std::move(keyType), std::move(valType));
-};
+}
 
 std::shared_ptr<const FunctionType> FUNCTION(
     std::vector<TypePtr>&& argumentTypes,
     TypePtr returnType) {
   return std::make_shared<const FunctionType>(
       std::move(argumentTypes), std::move(returnType));
-};
+}
 
 #define VELOX_DEFINE_SCALAR_ACCESSOR(KIND)                   \
   std::shared_ptr<const ScalarType<TypeKind::KIND>> KIND() { \
@@ -687,6 +747,7 @@ VELOX_DEFINE_SCALAR_ACCESSOR(BOOLEAN);
 VELOX_DEFINE_SCALAR_ACCESSOR(TINYINT);
 VELOX_DEFINE_SCALAR_ACCESSOR(SMALLINT);
 VELOX_DEFINE_SCALAR_ACCESSOR(BIGINT);
+VELOX_DEFINE_SCALAR_ACCESSOR(HUGEINT);
 VELOX_DEFINE_SCALAR_ACCESSOR(REAL);
 VELOX_DEFINE_SCALAR_ACCESSOR(DOUBLE);
 VELOX_DEFINE_SCALAR_ACCESSOR(TIMESTAMP);
@@ -832,37 +893,6 @@ exec::CastOperatorPtr getCustomTypeCastOperator(const std::string& name) {
   return nullptr;
 }
 
-TypePtr fromKindToScalerType(TypeKind kind) {
-  switch (kind) {
-    case TypeKind::TINYINT:
-      return TINYINT();
-    case TypeKind::BOOLEAN:
-      return BOOLEAN();
-    case TypeKind::SMALLINT:
-      return SMALLINT();
-    case TypeKind::BIGINT:
-      return BIGINT();
-    case TypeKind::INTEGER:
-      return INTEGER();
-    case TypeKind::REAL:
-      return REAL();
-    case TypeKind::VARCHAR:
-      return VARCHAR();
-    case TypeKind::VARBINARY:
-      return VARBINARY();
-    case TypeKind::TIMESTAMP:
-      return TIMESTAMP();
-    case TypeKind::DOUBLE:
-      return DOUBLE();
-    case TypeKind::UNKNOWN:
-      return UNKNOWN();
-    default:
-      VELOX_UNSUPPORTED(
-          "Kind is not a scalar type: {}", mapTypeKindToName(kind));
-      return nullptr;
-  }
-}
-
 void toTypeSql(const TypePtr& type, std::ostream& out) {
   switch (type->kind()) {
     case TypeKind::ARRAY:
@@ -931,11 +961,12 @@ std::string IntervalDayTimeType::valueToString(int64_t value) const {
 std::string IntervalYearMonthType::valueToString(int32_t value) const {
   std::ostringstream oss;
   auto sign = "";
-  if (value < 0) {
+  int64_t longValue = value;
+  if (longValue < 0) {
     sign = "-";
-    value = -value;
+    longValue = -longValue;
   }
-  oss << fmt::format("{}{}-{}", sign, value / 12, value % 12);
+  oss << fmt::format("{}{}-{}", sign, longValue / 12, longValue % 12);
   return oss.str();
 }
 
@@ -943,19 +974,19 @@ std::string DateType::toString(int32_t days) const {
   // Find the number of seconds for the days_;
   // Casting 86400 to int64 to handle overflows gracefully.
   int64_t daySeconds = days * (int64_t)(86400);
-
-  // gmtime is not thread-safe. Make sure to use gmtime_r.
   std::tm tmValue;
-  VELOX_CHECK_NOT_NULL(
-      gmtime_r((const time_t*)&daySeconds, &tmValue),
+  VELOX_CHECK(
+      Timestamp::epochToUtc(daySeconds, tmValue),
       "Can't convert days to dates: {}",
       days);
-
-  // return ISO 8601 time format.
-  // %F - equivalent to "%Y-%m-%d" (the ISO 8601 date format)
-  std::ostringstream oss;
-  oss << std::put_time(&tmValue, "%F");
-  return oss.str();
+  TimestampToStringOptions options;
+  options.mode = TimestampToStringOptions::Mode::kDateOnly;
+  std::string result;
+  result.resize(getMaxStringLength(options));
+  const auto view =
+      Timestamp::tmToStringView(tmValue, 0, options, result.data());
+  result.resize(view.size());
+  return result;
 }
 
 int32_t DateType::toDays(folly::StringPiece in) const {
@@ -976,6 +1007,7 @@ const SingletonTypeMap& singletonBuiltInTypes() {
       {"SMALLINT", SMALLINT()},
       {"INTEGER", INTEGER()},
       {"BIGINT", BIGINT()},
+      {"HUGEINT", HUGEINT()},
       {"REAL", REAL()},
       {"DOUBLE", DOUBLE()},
       {"VARCHAR", VARCHAR()},
@@ -987,7 +1019,7 @@ const SingletonTypeMap& singletonBuiltInTypes() {
       {"UNKNOWN", UNKNOWN()},
   };
   return kTypes;
-};
+}
 
 class DecimalParametricType {
  public:

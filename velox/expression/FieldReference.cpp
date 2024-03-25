@@ -20,18 +20,24 @@
 
 namespace facebook::velox::exec {
 
-void FieldReference::evalSpecialForm(
+void FieldReference::computeDistinctFields() {
+  SpecialForm::computeDistinctFields();
+  if (inputs_.empty()) {
+    mergeFields(
+        distinctFields_,
+        multiplyReferencedFields_,
+        {this->as<FieldReference>()});
+  }
+}
+
+void FieldReference::apply(
     const SelectivityVector& rows,
     EvalCtx& context,
     VectorPtr& result) {
-  if (result) {
-    context.ensureWritable(rows, type_, result);
-  }
   const RowVector* row;
   DecodedVector decoded;
   VectorPtr input;
   std::shared_ptr<PeeledEncoding> peeledEncoding;
-  VectorRecycler inputRecycler(input, context.vectorPool());
   bool useDecode = false;
   LocalSelectivityVector nonNullRowsHolder(*context.execCtx());
   const SelectivityVector* nonNullRows = &rows;
@@ -40,25 +46,14 @@ void FieldReference::evalSpecialForm(
   } else {
     inputs_[0]->eval(rows, context, input);
 
-    if (auto rowTry = input->as<RowVector>()) {
-      // Make sure output is not copied
-      if (rowTry->isCodegenOutput()) {
-        auto rowType = dynamic_cast<const RowType*>(rowTry->type().get());
-        index_ = rowType->getChildIdx(field_);
-        result = std::move(rowTry->childAt(index_));
-        VELOX_CHECK(result.unique());
-        return;
-      }
-    }
-
     decoded.decode(*input, rows);
     if (decoded.mayHaveNulls()) {
       nonNullRowsHolder.get(rows);
       nonNullRowsHolder->deselectNulls(
-          decoded.nulls(), rows.begin(), rows.end());
+          decoded.nulls(&rows), rows.begin(), rows.end());
       nonNullRows = nonNullRowsHolder.get();
       if (!nonNullRows->hasSelections()) {
-        addNulls(rows, decoded.nulls(), context, result);
+        addNulls(rows, decoded.nulls(&rows), context, result);
         return;
       }
     }
@@ -69,6 +64,10 @@ void FieldReference::evalSpecialForm(
       peeledEncoding = PeeledEncoding::peel(
           {input}, *nonNullRows, localDecoded, true, peeledVectors);
       VELOX_CHECK_NOT_NULL(peeledEncoding);
+      if (peeledVectors[0]->isLazy()) {
+        peeledVectors[0] =
+            peeledVectors[0]->as<LazyVector>()->loadedVectorShared();
+      }
       VELOX_CHECK(peeledVectors[0]->encoding() == VectorEncoding::Simple::ROW);
       row = peeledVectors[0]->as<const RowVector>();
     } else {
@@ -102,11 +101,21 @@ void FieldReference::evalSpecialForm(
                              type_, context.pool(), child, *nonNullRows))
                        : std::move(child);
   }
+  child.reset();
 
   // Check for nulls in the input struct. Propagate these nulls to 'result'.
   if (!inputs_.empty() && decoded.mayHaveNulls()) {
-    addNulls(rows, decoded.nulls(), context, result);
+    addNulls(rows, decoded.nulls(&rows), context, result);
   }
+}
+
+void FieldReference::evalSpecialForm(
+    const SelectivityVector& rows,
+    EvalCtx& context,
+    VectorPtr& result) {
+  VectorPtr localResult;
+  apply(rows, context, localResult);
+  context.moveOrCopyResult(localResult, rows, result);
 }
 
 void FieldReference::evalSpecialFormSimplified(
@@ -135,9 +144,22 @@ void FieldReference::evalSpecialFormSimplified(
   } else {
     VELOX_CHECK_EQ(index_, index);
   }
+
+  LocalSelectivityVector nonNullRowsHolder(*context.execCtx());
+  const SelectivityVector* nonNullRows = &rows;
+  if (row->mayHaveNulls()) {
+    nonNullRowsHolder.get(rows);
+    nonNullRowsHolder->deselectNulls(row->rawNulls(), rows.begin(), rows.end());
+    nonNullRows = nonNullRowsHolder.get();
+    if (!nonNullRows->hasSelections()) {
+      addNulls(rows, row->rawNulls(), context, result);
+      return;
+    }
+  }
+
   auto& child = row->childAt(index_);
   context.ensureWritable(rows, type_, result);
-  result->copy(child.get(), rows, nullptr);
+  result->copy(child.get(), *nonNullRows, nullptr);
   if (row->mayHaveNulls()) {
     addNulls(rows, row->rawNulls(), context, result);
   }

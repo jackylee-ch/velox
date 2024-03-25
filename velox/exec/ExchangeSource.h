@@ -15,6 +15,7 @@
  */
 #pragma once
 
+#include "velox/common/base/RuntimeMetrics.h"
 #include "velox/exec/ExchangeQueue.h"
 
 namespace facebook::velox::exec {
@@ -39,50 +40,74 @@ class ExchangeSource : public std::enable_shared_from_this<ExchangeSource> {
       std::shared_ptr<ExchangeQueue> queue,
       memory::MemoryPool* pool);
 
-  /// Temporary API to indicate whether 'request(maxBytes)' API is supported.
-  virtual bool supportsFlowControl() const {
+  /// Temporary API to indicate whether 'metrics()' API
+  /// is supported.
+  virtual bool supportsMetrics() const {
     return false;
   }
 
-  // Returns true if there is no request to the source pending or if
-  // this should be retried. If true, the caller is expected to call
-  // request(). This is expected to be called while holding lock over
-  // queue_.mutex(). This sets the status of 'this' to be pending. The
-  // caller is thus expected to call request() without holding a lock over
-  // queue_.mutex(). This pattern prevents multiple exchange consumer
-  // threads from issuing the same request.
+  /// Returns true if there is no request to the source pending or if
+  /// this should be retried. If true, the caller is expected to call
+  /// request(). This is expected to be called while holding lock over
+  /// queue_.mutex(). This sets the status of 'this' to be pending. The
+  /// caller is thus expected to call request() without holding a lock over
+  /// queue_.mutex(). This pattern prevents multiple exchange consumer
+  /// threads from issuing the same request.
   virtual bool shouldRequestLocked() = 0;
 
   virtual bool isRequestPendingLocked() const {
     return requestPending_;
   }
 
-  // Requests the producer to generate more data. Call only if shouldRequest()
-  // was true. The object handles its own lifetime by acquiring a
-  // shared_from_this() pointer if needed.
-  virtual void request() {
-    VELOX_UNSUPPORTED();
-  }
+  struct Response {
+    /// Size of the response in bytes. Zero means response didn't contain any
+    /// data.
+    const int64_t bytes;
 
-  /// Requests the producer to generate up to 'maxBytes' more data.
-  /// Returns a future that completes when producer responds either with 'data'
-  /// or with a message indicating that all data has been already produced or
-  /// data will take more time to produce. Legacy ExchangeSources return empty
-  /// future and keep fetching data until it arrives or no-more-data message is
-  /// received.
-  virtual ContinueFuture request(uint32_t maxBytes) {
-    request();
-    return ContinueFuture::makeEmpty();
-  }
+    /// Boolean indicating that there will be no more data.
+    const bool atEnd;
 
-  // Close the exchange source. May be called before all data
-  // has been received and proessed. This can happen in case
-  // of an error or an operator like Limit aborting the query
-  // once it received enough data.
+    /// Number of bytes still buffered at the source.  Each element represent
+    /// one page, and the consumer can choose to fetch a prefix of them
+    /// according to the memory restriction.
+    const std::vector<int64_t> remainingBytes;
+  };
+
+  /// Requests the producer to generate up to 'maxBytes' more data and reply
+  /// within 'maxWait'. Returns a future that completes when producer responds
+  /// either with 'data' or with a message indicating that all data has been
+  /// already produced or data will take more time to produce.
+  virtual folly::SemiFuture<Response> request(
+      uint32_t maxBytes,
+      std::chrono::microseconds maxWait) = 0;
+
+  /// Ask for available data sizes that can be fetched.  Normally should not
+  /// fetching any actual data (i.e. Response::bytes should be 0).  However for
+  /// backward compatibility (e.g. communicating with coordinator), we allow
+  /// small data (1MB) to be returned.
+  virtual folly::SemiFuture<Response> requestDataSizes(
+      std::chrono::microseconds maxWait) = 0;
+
+  /// Close the exchange source. May be called before all data
+  /// has been received and processed. This can happen in case
+  /// of an error or an operator like Limit aborting the query
+  /// once it received enough data.
   virtual void close() = 0;
 
-  // Returns runtime statistics.
-  virtual folly::F14FastMap<std::string, int64_t> stats() const = 0;
+  // Returns runtime statistics. ExchangeSource is expected to report
+  // background CPU time by including a runtime metric named
+  // ExchangeClient::kBackgroundCpuTimeMs.
+  virtual folly::F14FastMap<std::string, int64_t> stats() const {
+    VELOX_UNREACHABLE();
+  }
+
+  /// Returns runtime statistics. ExchangeSource is expected to report
+  /// Specify units of individual counters in ExchangeSource.
+  /// for an example: 'totalBytes ：count: 9, sum: 11.17GB, max: 1.39GB,
+  /// min:  1.16GB'
+  virtual folly::F14FastMap<std::string, RuntimeMetric> metrics() const {
+    VELOX_NYI();
+  }
 
   virtual std::string toString() {
     std::stringstream out;
@@ -91,14 +116,14 @@ class ExchangeSource : public std::enable_shared_from_this<ExchangeSource> {
     return out.str();
   }
 
-  virtual std::string toJsonString() {
+  virtual folly::dynamic toJson() {
     folly::dynamic obj = folly::dynamic::object;
     obj["taskId"] = taskId_;
     obj["destination"] = destination_;
     obj["sequence"] = sequence_;
     obj["requestPending"] = requestPending_.load();
     obj["atEnd"] = atEnd_;
-    return folly::toPrettyJson(obj);
+    return obj;
   }
 
   using Factory = std::function<std::shared_ptr<ExchangeSource>(
@@ -119,11 +144,7 @@ class ExchangeSource : public std::enable_shared_from_this<ExchangeSource> {
   const std::string taskId_;
   // Destination number of 'this' on producer
   const int destination_;
-  int64_t sequence_ = 0;
-  std::shared_ptr<ExchangeQueue> queue_;
-  std::atomic<bool> requestPending_{false};
-  bool atEnd_ = false;
-
+  const std::shared_ptr<ExchangeQueue> queue_;
   // Holds a shared reference on the memory pool as it might be still possible
   // to be accessed by external components after the query task is destroyed.
   // For instance, in Prestissimo, there might be a pending http request issued
@@ -132,6 +153,10 @@ class ExchangeSource : public std::enable_shared_from_this<ExchangeSource> {
   // so we need to hold an additional shared reference on the memory pool to
   // keeps it alive.
   const std::shared_ptr<memory::MemoryPool> pool_;
+
+  int64_t sequence_{0};
+  std::atomic<bool> requestPending_{false};
+  bool atEnd_{false};
 };
 
 } // namespace facebook::velox::exec

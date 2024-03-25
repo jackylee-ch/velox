@@ -14,9 +14,11 @@
  * limitations under the License.
  */
 
+#include <algorithm>
 #include "velox/functions/lib/aggregates/MinMaxByAggregatesBase.h"
 #include "velox/functions/lib/aggregates/ValueSet.h"
 #include "velox/functions/prestosql/aggregates/AggregateNames.h"
+#include "velox/functions/prestosql/aggregates/Compare.h"
 
 using namespace facebook::velox::functions::aggregate;
 
@@ -47,10 +49,10 @@ struct Comparator {
       // is less than vector value.
       if constexpr (greaterThan) {
         return !accumulator->hasValue() ||
-            (accumulator->compare(newComparisons, index) < 0);
+            prestosql::compare(accumulator, newComparisons, index) < 0;
       } else {
         return !accumulator->hasValue() ||
-            (accumulator->compare(newComparisons, index) > 0);
+            prestosql::compare(accumulator, newComparisons, index) > 0;
       }
     }
   }
@@ -88,25 +90,26 @@ struct MinMaxByNAccumulator {
   int64_t n{0};
 
   using Pair = std::pair<C, std::optional<V>>;
-  using Queue =
-      std::priority_queue<Pair, std::vector<Pair, StlAllocator<Pair>>, Compare>;
-  Queue topPairs;
+  using Heap = std::vector<Pair, StlAllocator<Pair>>;
+  Heap heapValues;
 
   explicit MinMaxByNAccumulator(HashStringAllocator* allocator)
-      : topPairs{Compare{}, StlAllocator<Pair>(allocator)} {}
+      : heapValues{StlAllocator<Pair>(allocator)} {}
 
   int64_t getN() const {
     return n;
   }
 
   size_t size() const {
-    return topPairs.size();
+    return heapValues.size();
   }
 
   void checkAndSetN(DecodedVector& decodedN, vector_size_t row) {
-    VELOX_USER_CHECK(
-        !decodedN.isNullAt(row),
-        "third argument of max_by/min_by must be a positive integer");
+    // Skip null N.
+    if (decodedN.isNullAt(row)) {
+      return;
+    }
+
     const auto newN = decodedN.valueAt<int64_t>(row);
     VELOX_USER_CHECK_GT(
         newN, 0, "third argument of max_by/min_by must be a positive integer");
@@ -123,61 +126,64 @@ struct MinMaxByNAccumulator {
 
   void
   compareAndAdd(C comparison, std::optional<V> value, Compare& comparator) {
-    if (topPairs.size() < n) {
-      topPairs.push({comparison, value});
+    if (heapValues.size() < n) {
+      heapValues.push_back({comparison, value});
+      std::push_heap(heapValues.begin(), heapValues.end(), comparator);
     } else {
-      const auto& topPair = topPairs.top();
+      const auto& topPair = heapValues.front();
       if (comparator.compare(comparison, topPair)) {
-        topPairs.pop();
-        topPairs.push({comparison, value});
+        std::pop_heap(heapValues.begin(), heapValues.end(), comparator);
+        heapValues.back() = std::make_pair(comparison, value);
+        std::push_heap(heapValues.begin(), heapValues.end(), comparator);
       }
     }
   }
 
-  /// Moves all values from 'topPairs' into 'rawValues' and 'rawValueNulls'
-  /// buffers. The queue of 'topPairs' will be empty after this call.
+  /// Extract all values from 'heapValues' into 'rawValues' and 'rawValueNulls'
+  /// buffers. The heap remains unchanged after the call.
   void extractValues(
       TRawValue* rawValues,
       uint64_t* rawValueNulls,
-      vector_size_t offset) {
-    const vector_size_t size = topPairs.size();
-    for (auto i = size - 1; i >= 0; --i) {
-      const auto& topPair = topPairs.top();
+      vector_size_t offset,
+      Compare& comparator) {
+    std::sort_heap(heapValues.begin(), heapValues.end(), comparator);
+    // Add heap elements to rawValues in ascending order.
+    for (int64_t i = 0; i < heapValues.size(); ++i) {
+      const auto& pair = heapValues[i];
       const auto index = offset + i;
-
-      const bool valueIsNull = !topPair.second.has_value();
+      const bool valueIsNull = !pair.second.has_value();
       bits::setNull(rawValueNulls, index, valueIsNull);
       if (!valueIsNull) {
-        RawValueExtractor<V>::extract(rawValues, index, topPair.second.value());
+        RawValueExtractor<V>::extract(rawValues, index, pair.second.value());
       }
-
-      topPairs.pop();
     }
+    std::make_heap(heapValues.begin(), heapValues.end(), comparator);
   }
 
-  /// Moves all pairs of (comparison, value) from 'topPairs' into
-  /// 'rawComparisons', 'rawValues' and 'rawValueNulls' buffers. The queue of
-  /// 'topPairs' will be empty after this call.
+  /// Moves all pairs of (comparison, value) from 'heapValues' into
+  /// 'rawComparisons', 'rawValues' and 'rawValueNulls' buffers. The heap
+  /// remains unchanged after the call.
   void extractPairs(
       TRawComparison* rawComparisons,
       TRawValue* rawValues,
       uint64_t* rawValueNulls,
-      vector_size_t offset) {
-    const vector_size_t size = topPairs.size();
-    for (auto i = size - 1; i >= 0; --i) {
-      const auto& topPair = topPairs.top();
+      vector_size_t offset,
+      Compare& comparator) {
+    std::sort_heap(heapValues.begin(), heapValues.end(), comparator);
+    // Add heap elements to rawComparisons and rawValues in ascending order.
+    for (int64_t i = 0; i < heapValues.size(); ++i) {
+      const auto& pair = heapValues[i];
       const auto index = offset + i;
 
-      RawValueExtractor<C>::extract(rawComparisons, index, topPair.first);
+      RawValueExtractor<C>::extract(rawComparisons, index, pair.first);
 
-      const bool valueIsNull = !topPair.second.has_value();
+      const bool valueIsNull = !pair.second.has_value();
       bits::setNull(rawValueNulls, index, valueIsNull);
       if (!valueIsNull) {
-        RawValueExtractor<V>::extract(rawValues, index, topPair.second.value());
+        RawValueExtractor<V>::extract(rawValues, index, pair.second.value());
       }
-
-      topPairs.pop();
     }
+    std::make_heap(heapValues.begin(), heapValues.end(), comparator);
   }
 };
 
@@ -196,15 +202,18 @@ struct Extractor {
 
   void extractValues(
       MinMaxByNAccumulator<V, C, Compare>* accumulator,
-      vector_size_t offset) {
-    accumulator->extractValues(rawValues, rawValueNulls, offset);
+      vector_size_t offset,
+      Compare& comparator) {
+    accumulator->extractValues(rawValues, rawValueNulls, offset, comparator);
   }
 
   void extractPairs(
       MinMaxByNAccumulator<V, C, Compare>* accumulator,
       TRawComparison* rawComparisons,
-      vector_size_t offset) {
-    accumulator->extractPairs(rawComparisons, rawValues, rawValueNulls, offset);
+      vector_size_t offset,
+      Compare& comparator) {
+    accumulator->extractPairs(
+        rawComparisons, rawValues, rawValueNulls, offset, comparator);
   }
 };
 
@@ -218,10 +227,8 @@ struct MinMaxByNStringViewAccumulator {
       : base{allocator}, valueSet{allocator} {}
 
   ~MinMaxByNStringViewAccumulator() {
-    while (!base.topPairs.empty()) {
-      auto& pair = base.topPairs.top();
-      freePair(pair);
-      base.topPairs.pop();
+    for (auto i = 0; i < base.heapValues.size(); ++i) {
+      freePair(base.heapValues[i]);
     }
   }
 
@@ -239,47 +246,52 @@ struct MinMaxByNStringViewAccumulator {
 
   void
   compareAndAdd(C comparison, std::optional<V> value, Compare& comparator) {
-    if (base.topPairs.size() < base.n) {
-      addToAccumulator(comparison, value);
+    if (base.heapValues.size() < base.n) {
+      addToAccumulator(comparison, value, comparator);
     } else {
-      const auto& topPair = base.topPairs.top();
+      const auto& topPair = base.heapValues.front();
       if (comparator.compare(comparison, topPair)) {
-        freePair(topPair);
-        base.topPairs.pop();
-        addToAccumulator(comparison, value);
+        std::pop_heap(
+            base.heapValues.begin(), base.heapValues.end(), comparator);
+        base.heapValues.pop_back();
+        addToAccumulator(comparison, value, comparator);
       }
     }
   }
 
-  /// Moves all values from 'topPairs' into 'values'
-  /// buffers. The queue of 'topPairs' will be empty after this call.
-  void extractValues(FlatVector<V>& values, vector_size_t offset) {
-    const vector_size_t size = base.topPairs.size();
-    for (auto i = size - 1; i >= 0; --i) {
-      const auto& pair = base.topPairs.top();
+  /// Extract all values from 'heapValues' into 'rawValues' and 'rawValueNulls'
+  /// buffers. The heap remains unchanged after the call.
+  void extractValues(
+      FlatVector<V>& values,
+      vector_size_t offset,
+      Compare& comparator) {
+    std::sort_heap(base.heapValues.begin(), base.heapValues.end(), comparator);
+    // Add heap elements to values in ascending order.
+    for (int64_t i = 0; i < base.heapValues.size(); ++i) {
+      const auto& pair = base.heapValues[i];
       extractValue(pair, values, offset + i);
-      freePair(pair);
-      base.topPairs.pop();
     }
+    std::make_heap(base.heapValues.begin(), base.heapValues.end(), comparator);
   }
 
-  /// Moves all pairs of (comparison, value) from 'topPairs' into
-  /// 'rawComparisons' buffer and 'values' vector. The queue of
-  /// 'topPairs' will be empty after this call.
+  /// Moves all pairs of (comparison, value) from 'heapValues' into
+  /// 'rawComparisons', 'rawValues' and 'rawValueNulls' buffers. The heap
+  /// remains unchanged after the call.
   void extractPairs(
       FlatVector<C>& compares,
       FlatVector<V>& values,
-      vector_size_t offset) {
-    const vector_size_t size = base.topPairs.size();
-    for (auto i = size - 1; i >= 0; --i) {
-      const auto& topPair = base.topPairs.top();
+      vector_size_t offset,
+      Compare& comparator) {
+    std::sort_heap(base.heapValues.begin(), base.heapValues.end(), comparator);
+    // Add heap elements to compares and values in ascending order.
+    for (int64_t i = 0; i < base.heapValues.size(); ++i) {
+      const auto& pair = base.heapValues[i];
       const auto index = offset + i;
 
-      extractCompare(topPair, compares, index);
-      extractValue(topPair, values, index);
-      freePair(topPair);
-      base.topPairs.pop();
+      extractCompare(pair, compares, index);
+      extractValue(pair, values, index);
     }
+    std::make_heap(base.heapValues.begin(), base.heapValues.end(), comparator);
   }
 
  private:
@@ -293,48 +305,50 @@ struct MinMaxByNStringViewAccumulator {
     return valueSet.write(*value);
   }
 
-  void addToAccumulator(C comparison, std::optional<V> value) {
+  void
+  addToAccumulator(C comparison, std::optional<V> value, Compare& comparator) {
     if constexpr (
         std::is_same_v<V, StringView> && std::is_same_v<C, StringView>) {
-      base.topPairs.push({valueSet.write(comparison), writeString(value)});
+      base.heapValues.push_back(
+          std::make_pair(valueSet.write(comparison), writeString(value)));
     } else if constexpr (std::is_same_v<V, StringView>) {
-      base.topPairs.push({comparison, writeString(value)});
+      base.heapValues.push_back(std::make_pair(comparison, writeString(value)));
     } else {
       static_assert(
           std::is_same_v<C, StringView>,
           "At least one of V and C must be StringView.");
-      base.topPairs.push({valueSet.write(comparison), value});
+      base.heapValues.push_back(
+          std::make_pair(valueSet.write(comparison), value));
     }
+    std::push_heap(base.heapValues.begin(), base.heapValues.end(), comparator);
   }
 
-  void freePair(typename BaseType::Queue::const_reference topPair) {
+  void freePair(typename BaseType::Heap::const_reference pair) {
     if constexpr (std::is_same_v<C, StringView>) {
-      valueSet.free(topPair.first);
+      valueSet.free(pair.first);
     }
     if constexpr (std::is_same_v<V, StringView>) {
-      if (topPair.second.has_value()) {
-        valueSet.free(*topPair.second);
+      if (pair.second.has_value()) {
+        valueSet.free(*pair.second);
       }
     }
   }
 
-  void extractValue(
-      const Pair& topPair,
-      FlatVector<V>& values,
-      vector_size_t index) {
-    const bool valueIsNull = !topPair.second.has_value();
+  void
+  extractValue(const Pair& pair, FlatVector<V>& values, vector_size_t index) {
+    const bool valueIsNull = !pair.second.has_value();
     values.setNull(index, valueIsNull);
     if (!valueIsNull) {
-      values.set(index, topPair.second.value());
+      values.set(index, pair.second.value());
     }
   }
 
   void extractCompare(
-      const Pair& topPair,
+      const Pair& pair,
       FlatVector<C>& compares,
       vector_size_t index) {
     compares.setNull(index, false);
-    compares.set(index, topPair.first);
+    compares.set(index, pair.first);
   }
 };
 
@@ -350,15 +364,17 @@ struct StringViewExtractor {
 
   void extractValues(
       MinMaxByNStringViewAccumulator<V, C, Compare>* accumulator,
-      vector_size_t offset) {
-    accumulator->extractValues(values, offset);
+      vector_size_t offset,
+      Compare& comparator) {
+    accumulator->extractValues(values, offset, comparator);
   }
 
   void extractPairs(
       MinMaxByNStringViewAccumulator<V, C, Compare>* accumulator,
-      vector_size_t offset) {
+      vector_size_t offset,
+      Compare& comparator) {
     VELOX_DCHECK_NOT_NULL(compares);
-    accumulator->extractPairs(*compares, values, offset);
+    accumulator->extractPairs(*compares, values, offset, comparator);
   }
 };
 
@@ -376,10 +392,8 @@ struct MinMaxByNComplexTypeAccumulator {
       : base{allocator}, valueSet{allocator} {}
 
   ~MinMaxByNComplexTypeAccumulator() {
-    while (!base.topPairs.empty()) {
-      auto& pair = base.topPairs.top();
-      freePair(pair);
-      base.topPairs.pop();
+    for (auto i = 0; i < base.heapValues.size(); ++i) {
+      freePair(base.heapValues[i]);
     }
   }
 
@@ -400,62 +414,69 @@ struct MinMaxByNComplexTypeAccumulator {
       DecodedVector& decoded,
       vector_size_t index,
       Compare& comparator) {
-    if (base.topPairs.size() < base.n) {
+    if (base.heapValues.size() < base.n) {
       auto position = writeComplex(decoded, index);
-      addToAccumulator(comparison, position);
+      addToAccumulator(comparison, position, comparator);
     } else {
-      const auto& topPair = base.topPairs.top();
+      const auto& topPair = base.heapValues.front();
       if (comparator.compare(comparison, topPair)) {
-        freePair(topPair);
-        base.topPairs.pop();
-
+        std::pop_heap(
+            base.heapValues.begin(), base.heapValues.end(), comparator);
         auto position = writeComplex(decoded, index);
-        addToAccumulator(comparison, position);
+        base.heapValues.pop_back();
+        addToAccumulator(comparison, position, comparator);
       }
     }
   }
 
-  /// Moves all values from 'topPairs' into 'values' vector. The queue of
-  /// 'topPairs' will be empty after this call.
-  void extractValues(BaseVector& values, vector_size_t offset) {
-    const vector_size_t size = base.topPairs.size();
-    for (auto i = size - 1; i >= 0; --i) {
-      const auto& pair = base.topPairs.top();
+  /// Extract all values from 'heapValues' into 'rawValues' and 'rawValueNulls'
+  /// buffers. The heap remains unchanged after the call.
+  void
+  extractValues(BaseVector& values, vector_size_t offset, Compare& comparator) {
+    std::sort_heap(base.heapValues.begin(), base.heapValues.end(), comparator);
+    // Add heap elements to values in ascending order.
+    for (int64_t i = 0; i < base.heapValues.size(); ++i) {
+      const auto& pair = base.heapValues[i];
       extractValue(pair, values, offset + i);
-      freePair(pair);
-      base.topPairs.pop();
     }
+    std::make_heap(base.heapValues.begin(), base.heapValues.end(), comparator);
   }
 
-  /// Moves all pairs of (comparison, value) from 'topPairs' into
-  /// 'rawComparisons' buffer and 'values' vector. The queue of
-  /// 'topPairs' will be empty after this call.
+  /// Moves all pairs of (comparison, value) from 'heapValues' into
+  /// 'rawComparisons', 'rawValues' and 'rawValueNulls' buffers. The heap
+  /// remains unchanged after the call.
   void extractPairs(
       FlatVector<C>& compares,
       BaseVector& values,
-      vector_size_t offset) {
-    const vector_size_t size = base.topPairs.size();
-    for (auto i = size - 1; i >= 0; --i) {
-      const auto& topPair = base.topPairs.top();
+      vector_size_t offset,
+      Compare& comparator) {
+    std::sort_heap(base.heapValues.begin(), base.heapValues.end(), comparator);
+    // Add heap elements to compares and values in ascending order.
+    for (int64_t i = 0; i < base.heapValues.size(); ++i) {
+      const auto& pair = base.heapValues[i];
       const auto index = offset + i;
 
-      extractCompare(topPair, compares, index);
-      extractValue(topPair, values, index);
-      freePair(topPair);
-      base.topPairs.pop();
+      extractCompare(pair, compares, index);
+      extractValue(pair, values, index);
     }
+    std::make_heap(base.heapValues.begin(), base.heapValues.end(), comparator);
   }
 
  private:
   using V = HashStringAllocator::Position;
   using Pair = typename MinMaxByNAccumulator<V, C, Compare>::Pair;
 
-  void addToAccumulator(C comparison, const std::optional<V>& position) {
+  void addToAccumulator(
+      C comparison,
+      const std::optional<V>& position,
+      Compare& comparator) {
     if constexpr (std::is_same_v<C, StringView>) {
-      base.topPairs.push({valueSet.write(comparison), position});
+      base.heapValues.push_back(
+          std::make_pair(valueSet.write(comparison), position));
     } else {
-      base.topPairs.push({comparison, position});
+      base.heapValues.push_back(std::make_pair(comparison, position));
     }
+    std::push_heap(base.heapValues.begin(), base.heapValues.end(), comparator);
   }
 
   std::optional<HashStringAllocator::Position> writeComplex(
@@ -469,33 +490,32 @@ struct MinMaxByNComplexTypeAccumulator {
     return position;
   }
 
-  void freePair(typename BaseType::Queue::const_reference topPair) {
+  void freePair(typename BaseType::Heap::const_reference pair) {
     if constexpr (std::is_same_v<C, StringView>) {
-      valueSet.free(topPair.first);
+      valueSet.free(pair.first);
     }
-    if (topPair.second.has_value()) {
-      valueSet.free(topPair.second->header);
+    if (pair.second.has_value()) {
+      valueSet.free(pair.second->header);
     }
   }
 
-  void
-  extractValue(const Pair& topPair, BaseVector& values, vector_size_t index) {
-    const bool valueIsNull = !topPair.second.has_value();
+  void extractValue(const Pair& pair, BaseVector& values, vector_size_t index) {
+    const bool valueIsNull = !pair.second.has_value();
     values.setNull(index, valueIsNull);
     if (!valueIsNull) {
-      auto position = topPair.second.value();
+      auto position = pair.second.value();
       valueSet.read(&values, index, position.header);
     }
   }
 
   void extractCompare(
-      const Pair& topPair,
+      const Pair& pair,
       FlatVector<C>& compares,
       vector_size_t index) {
     compares.setNull(index, false);
-    compares.set(index, topPair.first);
+    compares.set(index, pair.first);
   }
-}; // namespace
+};
 
 template <typename C, typename Compare>
 struct ComplexTypeExtractor {
@@ -508,15 +528,17 @@ struct ComplexTypeExtractor {
 
   void extractValues(
       MinMaxByNComplexTypeAccumulator<C, Compare>* accumulator,
-      vector_size_t offset) {
-    accumulator->extractValues(values, offset);
+      vector_size_t offset,
+      Compare& comparator) {
+    accumulator->extractValues(values, offset, comparator);
   }
 
   void extractPairs(
       MinMaxByNComplexTypeAccumulator<C, Compare>* accumulator,
-      vector_size_t offset) {
+      vector_size_t offset,
+      Compare& comparator) {
     VELOX_DCHECK_NOT_NULL(compares);
-    accumulator->extractPairs(*compares, values, offset);
+    accumulator->extractPairs(*compares, values, offset, comparator);
   }
 };
 
@@ -655,7 +677,7 @@ class MinMaxByNAggregate : public exec::Aggregate {
         rawOffsets[i] = offset;
         rawSizes[i] = size;
 
-        extractor->extractValues(accumulator, offset);
+        extractor->extractValues(accumulator, offset, comparator_);
 
         offset += size;
       }
@@ -665,11 +687,11 @@ class MinMaxByNAggregate : public exec::Aggregate {
   void extractAccumulators(char** groups, int32_t numGroups, VectorPtr* result)
       override {
     auto rowVector = (*result)->as<RowVector>();
+    rowVector->resize(numGroups);
+
     auto nVector = rowVector->childAt(0);
     auto comparisonArray = rowVector->childAt(1)->as<ArrayVector>();
     auto valueArray = rowVector->childAt(2)->as<ArrayVector>();
-
-    resizeRowVectorAndChildren(*rowVector, numGroups);
 
     auto* rawNs = nVector->as<FlatVector<int64_t>>()->mutableRawValues();
 
@@ -717,9 +739,10 @@ class MinMaxByNAggregate : public exec::Aggregate {
         if constexpr (
             std::is_same_v<V, StringView> || std::is_same_v<C, StringView> ||
             std::is_same_v<V, ComplexType>) {
-          extractor->extractPairs(accumulator, offset);
+          extractor->extractPairs(accumulator, offset, comparator_);
         } else {
-          extractor->extractPairs(accumulator, rawComparisons, offset);
+          extractor->extractPairs(
+              accumulator, rawComparisons, offset, comparator_);
         }
 
         offset += size;
@@ -737,7 +760,7 @@ class MinMaxByNAggregate : public exec::Aggregate {
     decodedN_.decode(*args[2], rows);
 
     rows.applyToSelected([&](vector_size_t i) {
-      if (decodedComparison_.isNullAt(i)) {
+      if (decodedComparison_.isNullAt(i) || decodedN_.isNullAt(i)) {
         return;
       }
 
@@ -776,7 +799,7 @@ class MinMaxByNAggregate : public exec::Aggregate {
     validateN(args[2], rows, accumulator);
 
     rows.applyToSelected([&](vector_size_t i) {
-      if (!decodedComparison_.isNullAt(i)) {
+      if (!decodedComparison_.isNullAt(i) && !decodedN_.isNullAt(i)) {
         addRawInput(group, i);
       }
     });
@@ -797,10 +820,7 @@ class MinMaxByNAggregate : public exec::Aggregate {
   }
 
   void destroy(folly::Range<char**> groups) override {
-    for (auto group : groups) {
-      auto* accumulator = Aggregate::value<AccumulatorType>(group);
-      std::destroy_at(accumulator);
-    }
+    destroyAccumulators<AccumulatorType>(groups);
   }
 
  private:
@@ -1060,6 +1080,8 @@ std::unique_ptr<exec::Aggregate> createNArg(
     case TypeKind::DOUBLE:
       return createNArg<NAggregate, double>(
           resultType, compareType, errorMessage);
+    case TypeKind::VARBINARY:
+      [[fallthrough]];
     case TypeKind::VARCHAR:
       return createNArg<NAggregate, StringView>(
           resultType, compareType, errorMessage);
@@ -1067,9 +1089,9 @@ std::unique_ptr<exec::Aggregate> createNArg(
       return createNArg<NAggregate, Timestamp>(
           resultType, compareType, errorMessage);
     case TypeKind::ARRAY:
-      FOLLY_FALLTHROUGH;
+      [[fallthrough]];
     case TypeKind::MAP:
-      FOLLY_FALLTHROUGH;
+      [[fallthrough]];
     case TypeKind::ROW:
       return createNArg<NAggregate, ComplexType>(
           resultType, compareType, errorMessage);
@@ -1100,7 +1122,20 @@ template <
     bool isMaxFunc,
     template <typename U, typename V>
     class NAggregate>
-exec::AggregateRegistrationResult registerMinMaxBy(const std::string& name) {
+exec::AggregateRegistrationResult registerMinMaxBy(
+    const std::string& name,
+    bool withCompanionFunctions,
+    bool overwrite) {
+  std::vector<std::shared_ptr<exec::AggregateFunctionSignature>> signatures;
+  // V, C -> row(V, C) -> V.
+  signatures.push_back(exec::AggregateFunctionSignatureBuilder()
+                           .typeVariable("V")
+                           .orderableTypeVariable("C")
+                           .returnType("V")
+                           .intermediateType("row(V,C)")
+                           .argumentType("V")
+                           .argumentType("C")
+                           .build());
   const std::vector<std::string> supportedCompareTypes = {
       "boolean",
       "tinyint",
@@ -1112,19 +1147,6 @@ exec::AggregateRegistrationResult registerMinMaxBy(const std::string& name) {
       "varchar",
       "date",
       "timestamp"};
-
-  std::vector<std::shared_ptr<exec::AggregateFunctionSignature>> signatures;
-  for (const auto& compareType : supportedCompareTypes) {
-    // V, C -> row(V, C) -> V.
-    signatures.push_back(
-        exec::AggregateFunctionSignatureBuilder()
-            .typeVariable("T")
-            .returnType("T")
-            .intermediateType(fmt::format("row(T,{})", compareType))
-            .argumentType("T")
-            .argumentType(compareType)
-            .build());
-  }
 
   // Add support for all value types to 3-arg version of the aggregate.
   for (const auto& compareType : supportedCompareTypes) {
@@ -1149,7 +1171,6 @@ exec::AggregateRegistrationResult registerMinMaxBy(const std::string& name) {
           const TypePtr& resultType,
           const core::QueryConfig& /*config*/)
           -> std::unique_ptr<exec::Aggregate> {
-        const auto isRawInput = exec::isRawInput(step);
         const std::string errorMessage = fmt::format(
             "Unknown input types for {} ({}) aggregation: {}",
             name,
@@ -1160,42 +1181,27 @@ exec::AggregateRegistrationResult registerMinMaxBy(const std::string& name) {
             (argTypes.size() == 1 && argTypes[0]->size() == 3);
 
         if (nAgg) {
-          if (isRawInput) {
-            // Input is: V, C, BIGINT.
-            return createNArg<NAggregate>(
-                resultType, argTypes[0], argTypes[1], errorMessage);
-          } else {
-            // Input is: ROW(BIGINT, ARRAY(C), ARRAY(V)).
-            const auto& rowType = argTypes[0];
-            const auto& compareType = rowType->childAt(1)->childAt(0);
-            const auto& valueType = rowType->childAt(2)->childAt(0);
-            return createNArg<NAggregate>(
-                resultType, valueType, compareType, errorMessage);
-          }
+          return createNArg<NAggregate>(
+              resultType, argTypes[0], argTypes[1], errorMessage);
         } else {
-          if (isRawInput) {
-            // Input is: V, C.
-            return create<Aggregate, Comparator, isMaxFunc>(
-                resultType, argTypes[0], argTypes[1], errorMessage);
-          } else {
-            // Input is: ROW(V, C).
-            const auto& rowType = argTypes[0];
-            const auto& valueType = rowType->childAt(0);
-            const auto& compareType = rowType->childAt(1);
-            return create<Aggregate, Comparator, isMaxFunc>(
-                resultType, valueType, compareType, errorMessage);
-          }
+          return create<Aggregate, Comparator, isMaxFunc>(
+              resultType, argTypes[0], argTypes[1], errorMessage, true);
         }
-      });
+      },
+      withCompanionFunctions,
+      overwrite);
 }
 
 } // namespace
 
-void registerMinMaxByAggregates(const std::string& prefix) {
+void registerMinMaxByAggregates(
+    const std::string& prefix,
+    bool withCompanionFunctions,
+    bool overwrite) {
   registerMinMaxBy<MinMaxByAggregateBase, true, MaxByNAggregate>(
-      prefix + kMaxBy);
+      prefix + kMaxBy, withCompanionFunctions, overwrite);
   registerMinMaxBy<MinMaxByAggregateBase, false, MinByNAggregate>(
-      prefix + kMinBy);
+      prefix + kMinBy, withCompanionFunctions, overwrite);
 }
 
 } // namespace facebook::velox::aggregate::prestosql

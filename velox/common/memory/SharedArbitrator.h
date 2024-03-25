@@ -31,34 +31,34 @@ namespace facebook::velox::memory {
 /// aborting a query. For Prestissimo-on-Spark, we can configure it to
 /// reclaim from a running query through techniques such as disk-spilling,
 /// partial aggregation or persistent shuffle data flushes.
-class SharedArbitrator : public MemoryArbitrator {
+class SharedArbitrator : public memory::MemoryArbitrator {
  public:
-  static void registerFactory();
-
-  static void unregisterFactory();
-
   explicit SharedArbitrator(const Config& config);
 
   ~SharedArbitrator() override;
 
-  void reserveMemory(MemoryPool* pool, uint64_t /*unused*/) final;
+  static void registerFactory();
 
-  void releaseMemory(MemoryPool* pool) final;
+  static void unregisterFactory();
 
-  bool growMemory(
+  uint64_t growCapacity(MemoryPool* pool, uint64_t targetBytes) final;
+
+  bool growCapacity(
       MemoryPool* pool,
       const std::vector<std::shared_ptr<MemoryPool>>& candidatePools,
       uint64_t targetBytes) final;
 
-  uint64_t shrinkMemory(
-      const std::vector<std::shared_ptr<MemoryPool>>& /*unused*/,
-      uint64_t /*unused*/) override final {
-    VELOX_NYI("shrinkMemory is not supported by SharedArbitrator");
-  }
+  uint64_t shrinkCapacity(MemoryPool* pool, uint64_t freedBytes) final;
+
+  uint64_t shrinkCapacity(
+      const std::vector<std::shared_ptr<MemoryPool>>& pools,
+      uint64_t targetBytes,
+      bool allowSpill = true,
+      bool force = false) override final;
 
   Stats stats() const final;
 
-  std::string kind() override;
+  std::string kind() const override;
 
   std::string toString() const final;
 
@@ -67,10 +67,14 @@ class SharedArbitrator : public MemoryArbitrator {
     bool reclaimable{false};
     uint64_t reclaimableBytes{0};
     uint64_t freeBytes{0};
+    int64_t currentBytes{0};
     MemoryPool* pool;
 
     std::string toString() const;
   };
+
+  /// Returns 'freeCapacity' back to the arbitrator for testing.
+  void testingFreeCapacity(uint64_t freeCapacity);
 
  private:
   // The kind string of shared arbitrator.
@@ -78,7 +82,14 @@ class SharedArbitrator : public MemoryArbitrator {
 
   class ScopedArbitration {
    public:
-    ScopedArbitration(MemoryPool* requestor, SharedArbitrator* arbitrator);
+    // Used by arbitration request NOT initiated from memory pool, e.g. through
+    // shrinkPools() API.
+    explicit ScopedArbitration(SharedArbitrator* arbitrator);
+
+    // Used by arbitration request initiated from a memory pool.
+    explicit ScopedArbitration(
+        MemoryPool* requestor,
+        SharedArbitrator* arbitrator);
 
     ~ScopedArbitration();
 
@@ -86,6 +97,7 @@ class SharedArbitrator : public MemoryArbitrator {
     MemoryPool* const requestor_;
     SharedArbitrator* const arbitrator_;
     const std::chrono::steady_clock::time_point startTime_;
+    const ScopedMemoryArbitrationContext arbitrationCtx_;
   };
 
   // Invoked to check if the memory growth will exceed the memory pool's max
@@ -101,23 +113,6 @@ class SharedArbitrator : public MemoryArbitrator {
   // requestor capacity accordingly.
   bool ensureCapacity(MemoryPool* requestor, uint64_t targetBytes);
 
-  // Invoked to capture the candidate memory pools stats for arbitration.
-  static std::vector<Candidate> getCandidateStats(
-      const std::vector<std::shared_ptr<MemoryPool>>& pools);
-
-  void sortCandidatesByReclaimableMemory(
-      std::vector<Candidate>& candidates) const;
-
-  void sortCandidatesByFreeCapacity(std::vector<Candidate>& candidates) const;
-
-  // Finds the candidate with the largest capacity. For 'requestor', the
-  // capacity for comparison including its current capacity and the capacity to
-  // grow.
-  const Candidate& findCandidateWithLargestCapacity(
-      MemoryPool* requestor,
-      uint64_t targetBytes,
-      const std::vector<Candidate>& candidates) const;
-
   bool arbitrateMemory(
       MemoryPool* requestor,
       std::vector<Candidate>& candidates,
@@ -126,7 +121,7 @@ class SharedArbitrator : public MemoryArbitrator {
   // Invoked to start next memory arbitration request, and it will wait for the
   // serialized execution if there is a running or other waiting arbitration
   // requests.
-  void startArbitration(MemoryPool* requestor);
+  void startArbitration(const std::string& contextMsg);
 
   // Invoked by a finished memory arbitration request to kick off the next
   // arbitration request execution if there are any ones waiting.
@@ -141,12 +136,18 @@ class SharedArbitrator : public MemoryArbitrator {
       std::vector<Candidate>& candidates,
       uint64_t targetBytes);
 
-  // Invoked to reclaim used memory capacity from 'candidates'.
+  // Invoked to reclaim used memory capacity from 'candidates' by spilling.
   //
   // NOTE: the function might sort 'candidates' based on each candidate's
   // reclaimable memory internally.
-  uint64_t reclaimUsedMemoryFromCandidates(
+  uint64_t reclaimUsedMemoryFromCandidatesBySpill(
       MemoryPool* requestor,
+      std::vector<Candidate>& candidates,
+      uint64_t targetBytes);
+
+  // Invoded to reclaim used memroy capacity from 'candidates' by aborting the
+  // top memory users' queries.
+  uint64_t reclaimUsedMemoryFromCandidatesByAbort(
       std::vector<Candidate>& candidates,
       uint64_t targetBytes);
 
@@ -191,11 +192,16 @@ class SharedArbitrator : public MemoryArbitrator {
   std::vector<ContinuePromise> waitPromises_;
 
   tsan_atomic<uint64_t> numRequests_{0};
+  std::atomic<uint64_t> numSucceeded_{0};
   tsan_atomic<uint64_t> numAborted_{0};
-  std::atomic<uint64_t> numFailures_{0};
+  tsan_atomic<uint64_t> numFailures_{0};
   tsan_atomic<uint64_t> queueTimeUs_{0};
   tsan_atomic<uint64_t> arbitrationTimeUs_{0};
   tsan_atomic<uint64_t> numShrunkBytes_{0};
   tsan_atomic<uint64_t> numReclaimedBytes_{0};
+  tsan_atomic<uint64_t> reclaimTimeUs_{0};
+  tsan_atomic<uint64_t> numNonReclaimableAttempts_{0};
+  tsan_atomic<uint64_t> numReserves_{0};
+  tsan_atomic<uint64_t> numReleases_{0};
 };
 } // namespace facebook::velox::memory

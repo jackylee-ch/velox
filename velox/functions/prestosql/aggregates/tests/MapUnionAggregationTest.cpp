@@ -15,7 +15,7 @@
  */
 #include "velox/common/base/tests/GTestUtils.h"
 #include "velox/exec/tests/utils/AssertQueryBuilder.h"
-#include "velox/functions/lib/aggregates/tests/AggregationTestBase.h"
+#include "velox/functions/lib/aggregates/tests/utils/AggregationTestBase.h"
 
 using namespace facebook::velox::exec;
 using namespace facebook::velox::exec::test;
@@ -262,7 +262,8 @@ TEST_F(MapUnionTest, nulls) {
 }
 
 TEST_F(MapUnionTest, unknownKeysAndValues) {
-  // map_union over empty map(unknown, unknown) is allowed.
+  // map_union over empty map(unknown, unknown) is allowed. Skip testing with
+  // TableScan because unknown type is not supported in writers.
   auto data = makeRowVector({
       makeFlatVector<int32_t>({1, 2, 1}),
       makeMapVector<UnknownValue, UnknownValue>({{}, {}, {}}),

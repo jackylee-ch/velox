@@ -32,19 +32,6 @@
 namespace facebook::velox {
 namespace {
 
-exec::TypeSignature typeToTypeSignature(std::shared_ptr<const Type> type) {
-  std::vector<exec::TypeSignature> children;
-  if (type->size()) {
-    children.reserve(type->size());
-    for (auto i = 0; i < type->size(); i++) {
-      children.emplace_back(typeToTypeSignature(type->childAt(i)));
-    }
-  }
-  const std::string& kindName = type->kindName();
-  return exec::TypeSignature(
-      boost::algorithm::to_lower_copy(kindName), std::move(children));
-}
-
 void populateSimpleFunctionSignatures(FunctionSignatureMap& map) {
   const auto& simpleFunctions = exec::simpleFunctions();
   for (const auto& functionName : simpleFunctions.getFunctionNames()) {
@@ -108,18 +95,6 @@ std::shared_ptr<const Type> resolveFunctionOrCallableSpecialForm(
 std::shared_ptr<const Type> resolveCallableSpecialForm(
     const std::string& functionName,
     const std::vector<TypePtr>& argTypes) {
-  // TODO Replace with struct_pack
-  if (functionName == "row_constructor") {
-    auto numInput = argTypes.size();
-    std::vector<TypePtr> types(numInput);
-    std::vector<std::string> names(numInput);
-    for (auto i = 0; i < numInput; i++) {
-      types[i] = argTypes[i];
-      names[i] = fmt::format("c{}", i + 1);
-    }
-    return ROW(std::move(names), std::move(types));
-  }
-
   return exec::resolveTypeForSpecialForm(functionName, argTypes);
 }
 

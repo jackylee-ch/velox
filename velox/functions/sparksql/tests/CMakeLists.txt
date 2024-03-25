@@ -15,20 +15,35 @@
 add_executable(
   velox_functions_spark_test
   ArithmeticTest.cpp
+  ArrayMaxTest.cpp
+  ArrayMinTest.cpp
   ArraySortTest.cpp
   BitwiseTest.cpp
-  CompareNullSafeTests.cpp
+  ComparisonsTest.cpp
   DateTimeFunctionsTest.cpp
+  DecimalArithmeticTest.cpp
+  DecimalCompareTest.cpp
+  DecimalRoundTest.cpp
+  DecimalUtilTest.cpp
   ElementAtTest.cpp
   HashTest.cpp
   InTest.cpp
   LeastGreatestTest.cpp
+  MakeDecimalTest.cpp
+  MakeTimestampTest.cpp
   MapTest.cpp
   MightContainTest.cpp
+  MonotonicallyIncreasingIdTest.cpp
+  RandTest.cpp
   RegexFunctionsTest.cpp
   SizeTest.cpp
   SortArrayTest.cpp
+  SparkCastExprTest.cpp
+  SparkPartitionIdTest.cpp
   StringTest.cpp
+  StringToMapTest.cpp
+  UnscaledValueFunctionTest.cpp
+  UuidTest.cpp
   XxHash64Test.cpp)
 
 add_test(velox_functions_spark_test velox_functions_spark_test)

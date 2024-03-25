@@ -14,12 +14,21 @@
  * limitations under the License.
  */
 #include "velox/functions/sparksql/RegisterArithmetic.h"
+#include "velox/functions/lib/CheckedArithmetic.h"
 #include "velox/functions/lib/RegistrationHelpers.h"
 #include "velox/functions/prestosql/Arithmetic.h"
-#include "velox/functions/prestosql/CheckedArithmetic.h"
 #include "velox/functions/sparksql/Arithmetic.h"
+#include "velox/functions/sparksql/Rand.h"
 
 namespace facebook::velox::functions::sparksql {
+
+void registerRandFunctions(const std::string& prefix) {
+  registerFunction<RandFunction, double>({prefix + "rand", prefix + "random"});
+  registerFunction<RandFunction, double, Constant<int32_t>>(
+      {prefix + "rand", prefix + "random"});
+  registerFunction<RandFunction, double, Constant<int64_t>>(
+      {prefix + "rand", prefix + "random"});
+}
 
 void registerArithmeticFunctions(const std::string& prefix) {
   // Operators.
@@ -40,8 +49,13 @@ void registerArithmeticFunctions(const std::string& prefix) {
   registerFunction<SinhFunction, double, double>({prefix + "sinh"});
   registerFunction<CoshFunction, double, double>({prefix + "cosh"});
   registerFunction<CotFunction, double, double>({prefix + "cot"});
+  registerFunction<Atan2Function, double, double, double>({prefix + "atan2"});
   registerFunction<Log1pFunction, double, double>({prefix + "log1p"});
   registerFunction<ToBinaryStringFunction, Varchar, int64_t>({prefix + "bin"});
+  registerFunction<ToHexBigintFunction, Varchar, int64_t>({prefix + "hex"});
+  registerFunction<ToHexVarcharFunction, Varchar, Varchar>({prefix + "hex"});
+  registerFunction<ToHexVarbinaryFunction, Varchar, Varbinary>(
+      {prefix + "hex"});
   registerFunction<ExpFunction, double, double>({prefix + "exp"});
   registerBinaryIntegral<PModIntFunction>({prefix + "pmod"});
   registerBinaryFloatingPoint<PModFloatFunction>({prefix + "pmod"});
@@ -56,6 +70,7 @@ void registerArithmeticFunctions(const std::string& prefix) {
       {prefix + "round"});
   registerFunction<RoundFunction, double, double, int32_t>({prefix + "round"});
   registerFunction<RoundFunction, float, float, int32_t>({prefix + "round"});
+  registerFunction<UnHexFunction, Varbinary, Varchar>({prefix + "unhex"});
   // In Spark only long, double, and decimal have ceil/floor
   registerFunction<sparksql::CeilFunction, int64_t, int64_t>({prefix + "ceil"});
   registerFunction<sparksql::CeilFunction, int64_t, double>({prefix + "ceil"});
@@ -66,6 +81,14 @@ void registerArithmeticFunctions(const std::string& prefix) {
   registerFunction<HypotFunction, double, double, double>({prefix + "hypot"});
   registerFunction<sparksql::Log2Function, double, double>({prefix + "log2"});
   registerFunction<sparksql::Log10Function, double, double>({prefix + "log10"});
+  registerRandFunctions(prefix);
+
+  VELOX_REGISTER_VECTOR_FUNCTION(udf_decimal_add, prefix + "add");
+  VELOX_REGISTER_VECTOR_FUNCTION(udf_decimal_sub, prefix + "subtract");
+  VELOX_REGISTER_VECTOR_FUNCTION(udf_decimal_mul, prefix + "multiply");
+  VELOX_REGISTER_VECTOR_FUNCTION(udf_decimal_div, prefix + "divide");
+  registerFunction<sparksql::IsNanFunction, bool, float>({prefix + "isnan"});
+  registerFunction<sparksql::IsNanFunction, bool, double>({prefix + "isnan"});
 }
 
 } // namespace facebook::velox::functions::sparksql

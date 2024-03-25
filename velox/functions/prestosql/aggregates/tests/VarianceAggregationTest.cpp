@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 #include "velox/exec/tests/utils/PlanBuilder.h"
-#include "velox/functions/lib/aggregates/tests/AggregationTestBase.h"
+#include "velox/functions/lib/aggregates/tests/utils/AggregationTestBase.h"
 
 using namespace facebook::velox::exec::test;
 using namespace facebook::velox::functions::aggregate::test;
@@ -211,7 +211,9 @@ TEST_F(VarianceAggregationTest, varianceWithGlobalAggregationAndFilter) {
 }
 
 TEST_F(VarianceAggregationTest, varianceWithGroupBy) {
-  auto vectors = makeVectors(rowType_, 10, 20);
+  // TODO: increase number of batches after fixing
+  // https://github.com/facebookincubator/velox/issues/6505.
+  auto vectors = makeVectors(rowType_, 10, 8);
   createDuckDbTable(vectors);
 
   for (const auto& aggrName : aggrNames_) {
@@ -288,6 +290,23 @@ TEST_F(VarianceAggregationTest, varianceWithoutPrecisionLoss) {
     auto sql = genAggrQuery("SELECT c0, {0}(c1) FROM tmp GROUP BY 1", aggrName);
     testAggregations(vectors, {"c0"}, {GEN_AGG("c1")}, sql);
   }
+}
+
+TEST_F(VarianceAggregationTest, varianceMergeEmpty) {
+  auto accumulators = makeRowVector({
+      makeRowVector({
+          makeFlatVector<int64_t>({0, 2}),
+          makeFlatVector<double>({0, 1.45419e163}),
+          makeFlatVector<double>({0, HUGE_VAL}),
+      }),
+  });
+  auto node = PlanBuilder(pool())
+                  .values({accumulators})
+                  .finalAggregation({}, {"variance(c0)"}, {{DOUBLE()}})
+                  .planNode();
+  auto expected =
+      makeRowVector({makeFlatVector(std::vector<double>({HUGE_VAL}))});
+  AssertQueryBuilder(node).assertResults(expected);
 }
 
 } // namespace

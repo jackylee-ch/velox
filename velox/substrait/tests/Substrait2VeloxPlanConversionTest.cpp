@@ -33,6 +33,10 @@ using namespace facebook::velox::exec;
 class Substrait2VeloxPlanConversionTest
     : public exec::test::HiveConnectorTestBase {
  protected:
+  static void SetUpTestCase() {
+    memory::MemoryManager::testingSetInstance({});
+  }
+
   std::vector<std::shared_ptr<facebook::velox::connector::ConnectorSplit>>
   makeSplits(
       const facebook::velox::substrait::SubstraitVeloxPlanConverter& converter,
@@ -82,7 +86,7 @@ class Substrait2VeloxPlanConversionTest
 //    l_quantity < 24
 //
 //  Tested Velox operators: TableScan (Filter Pushdown), Project, Aggregate.
-TEST_F(Substrait2VeloxPlanConversionTest, q6) {
+TEST_F(Substrait2VeloxPlanConversionTest, DISABLED_q6) {
   // Generate the used ORC file.
   auto type =
       ROW({"l_orderkey",
@@ -117,7 +121,8 @@ TEST_F(Substrait2VeloxPlanConversionTest, q6) {
            VARCHAR(),
            VARCHAR(),
            VARCHAR()});
-  std::shared_ptr<memory::MemoryPool> pool{memory::addDefaultLeafMemoryPool()};
+  std::shared_ptr<memory::MemoryPool> pool{
+      memory::memoryManager()->addLeafPool()};
   std::vector<VectorPtr> vectors;
   // TPC-H lineitem table has 16 columns.
   int colNum = 16;

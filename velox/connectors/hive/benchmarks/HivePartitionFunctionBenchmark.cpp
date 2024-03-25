@@ -30,7 +30,7 @@ using connector::hive::HivePartitionFunction;
 
 namespace {
 
-constexpr std::array<TypeKind, 10> kSupportedTypes{
+constexpr std::array<TypeKind, 10> kSupportedScalarTypes{
     TypeKind::BOOLEAN,
     TypeKind::TINYINT,
     TypeKind::SMALLINT,
@@ -52,10 +52,18 @@ class HivePartitionFunctionBenchmark
     opts.stringLength = 20;
     VectorFuzzer fuzzer(opts, pool(), FLAGS_fuzzer_seed);
     VectorMaker vm{pool_.get()};
-    for (auto typeKind : kSupportedTypes) {
-      auto flatVector = fuzzer.fuzzFlat(createScalarType(typeKind));
-      rowVectors_[typeKind] = vm.rowVector({flatVector});
+    auto addRowVector = [&](const TypePtr& type) {
+      auto flatVector = fuzzer.fuzzFlat(type);
+      rowVectors_[type->kind()] = vm.rowVector({flatVector});
+    };
+
+    for (auto typeKind : kSupportedScalarTypes) {
+      addRowVector(createScalarType(typeKind));
     }
+
+    addRowVector(ARRAY(REAL()));
+    addRowVector(MAP(BIGINT(), BOOLEAN()));
+    addRowVector(ROW({"a", "b"}, {INTEGER(), DOUBLE()}));
 
     // Prepare HivePartitionFunction
     fewBucketsFunction_ = createHivePartitionFunction(20);
@@ -264,12 +272,66 @@ BENCHMARK_RELATIVE(timestampManyRowsManyBuckets) {
 }
 
 BENCHMARK_DRAW_LINE();
+
+BENCHMARK(arrayFewRowsFewBuckets) {
+  benchmarkFew->runFew<TypeKind::ARRAY>();
+}
+
+BENCHMARK_RELATIVE(arrayFewRowsManyBuckets) {
+  benchmarkFew->runMany<TypeKind::ARRAY>();
+}
+
+BENCHMARK(arrayManyRowsFewBuckets) {
+  benchmarkMany->runFew<TypeKind::ARRAY>();
+}
+
+BENCHMARK_RELATIVE(arrayManyRowsManyBuckets) {
+  benchmarkMany->runMany<TypeKind::ARRAY>();
+}
+
+BENCHMARK_DRAW_LINE();
+
+BENCHMARK(mapFewRowsFewBuckets) {
+  benchmarkFew->runFew<TypeKind::MAP>();
+}
+
+BENCHMARK_RELATIVE(mapFewRowsManyBuckets) {
+  benchmarkFew->runMany<TypeKind::MAP>();
+}
+
+BENCHMARK(mapManyRowsFewBuckets) {
+  benchmarkMany->runFew<TypeKind::MAP>();
+}
+
+BENCHMARK_RELATIVE(mapManyRowsManyBuckets) {
+  benchmarkMany->runMany<TypeKind::MAP>();
+}
+
+BENCHMARK_DRAW_LINE();
+
+BENCHMARK(rowFewRowsFewBuckets) {
+  benchmarkFew->runFew<TypeKind::ROW>();
+}
+
+BENCHMARK_RELATIVE(rowFewRowsManyBuckets) {
+  benchmarkFew->runMany<TypeKind::ROW>();
+}
+
+BENCHMARK(rowManyRowsFewBuckets) {
+  benchmarkMany->runFew<TypeKind::ROW>();
+}
+
+BENCHMARK_RELATIVE(rowManyRowsManyBuckets) {
+  benchmarkMany->runMany<TypeKind::ROW>();
+}
+
+BENCHMARK_DRAW_LINE();
 } // namespace
 
 int main(int argc, char** argv) {
-  folly::init(&argc, &argv);
+  folly::Init init{&argc, &argv};
   gflags::ParseCommandLineFlags(&argc, &argv, true);
-
+  memory::MemoryManager::initialize({});
   benchmarkFew = std::make_unique<HivePartitionFunctionBenchmark>(1'000);
   benchmarkMany = std::make_unique<HivePartitionFunctionBenchmark>(10'000);
 

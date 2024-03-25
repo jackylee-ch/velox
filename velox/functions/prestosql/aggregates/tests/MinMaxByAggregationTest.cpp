@@ -16,7 +16,7 @@
 #include "velox/common/base/tests/GTestUtils.h"
 #include "velox/exec/tests/utils/AssertQueryBuilder.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
-#include "velox/functions/lib/aggregates/tests/AggregationTestBase.h"
+#include "velox/functions/lib/aggregates/tests/utils/AggregationTestBase.h"
 #include "velox/functions/prestosql/aggregates/AggregateNames.h"
 #include "velox/vector/fuzzer/VectorFuzzer.h"
 
@@ -461,6 +461,8 @@ class MinMaxByGlobalByAggregationTest
          fmt::format("SELECT {}", asSql(dataAt<T>(3)))}};
     for (const auto& testData : testSettings) {
       SCOPED_TRACE(testData.debugString());
+      // Skip testing with TableScan because the result for some testData
+      // depends on input order that is non-deterministic with two splits.
       testAggregations(
           {testData.inputRowVector},
           {},
@@ -555,6 +557,8 @@ class MinMaxByGlobalByAggregationTest
          fmt::format("SELECT {}", asSql(dataAt<T>(3)))}};
     for (const auto& testData : testSettings) {
       SCOPED_TRACE(testData.debugString());
+      // Skip testing with TableScan because the result for some testData
+      // depends on input order that is non-deterministic with two splits.
       testAggregations(
           {testData.inputRowVector},
           {},
@@ -610,11 +614,9 @@ TEST_P(
     MinMaxByGlobalByAggregationTest,
     randomMaxByGlobalByWithDistinctCompareValue) {
   if (GetParam().comparisonType == TypeKind::TIMESTAMP ||
-      GetParam().valueType == TypeKind::TIMESTAMP) {
+      GetParam().valueType == TypeKind::TIMESTAMP ||
+      GetParam().comparisonType == TypeKind::BOOLEAN) {
     return;
-  }
-  if (GetParam().comparisonType == TypeKind::BOOLEAN) {
-    GTEST_SKIP() << "Boolean comparison type is not supported in this test.";
   }
 
   // Enable disk spilling test with distinct comparison values.
@@ -622,8 +624,8 @@ TEST_P(
 
   auto rowType =
       ROW({"c0", "c1"},
-          {fromKindToScalerType(GetParam().valueType),
-           fromKindToScalerType(GetParam().comparisonType)});
+          {createScalarType(GetParam().valueType),
+           createScalarType(GetParam().comparisonType)});
 
   const bool isSmallInt = GetParam().comparisonType == TypeKind::TINYINT ||
       GetParam().comparisonType == TypeKind::SMALLINT;
@@ -646,7 +648,7 @@ TEST_P(
   for (int i = 0; i < kNumBatches; ++i) {
     // Generate a non-lazy vector so that it can be written out as a duckDB
     // table.
-    auto valueVector = fuzzer.fuzz(fromKindToScalerType(GetParam().valueType));
+    auto valueVector = fuzzer.fuzz(createScalarType(GetParam().valueType));
     auto comparisonVector = buildDataVector(
         GetParam().comparisonType,
         kBatchSize,
@@ -845,6 +847,8 @@ class MinMaxByGroupByAggregationTest
              asSql(dataAt<T>(0)))}};
     for (const auto& testData : testSettings) {
       SCOPED_TRACE(testData.debugString());
+      // Skip testing with TableScan because the result for some testData
+      // depends on input order that is non-deterministic with two splits.
       testAggregations(
           {testData.inputRowVector},
           {"c2"},
@@ -994,6 +998,8 @@ class MinMaxByGroupByAggregationTest
              asSql(dataAt<T>(0)))}};
     for (const auto& testData : testSettings) {
       SCOPED_TRACE(testData.debugString());
+      // Skip testing with TableScan because the result for some testData
+      // depends on input order that is non-deterministic with two splits.
       testAggregations(
           {testData.inputRowVector},
           {"c2"},
@@ -1044,11 +1050,9 @@ TEST_P(
     MinMaxByGroupByAggregationTest,
     randomMinMaxByGroupByWithDistinctCompareValue) {
   if (GetParam().comparisonType == TypeKind::TIMESTAMP ||
-      GetParam().valueType == TypeKind::TIMESTAMP) {
+      GetParam().valueType == TypeKind::TIMESTAMP ||
+      GetParam().comparisonType == TypeKind::BOOLEAN) {
     return;
-  }
-  if (GetParam().comparisonType == TypeKind::BOOLEAN) {
-    GTEST_SKIP() << "Boolean comparison type is not supported in this test.";
   }
 
   // Enable disk spilling test with distinct comparison values.
@@ -1056,8 +1060,8 @@ TEST_P(
 
   auto rowType =
       ROW({"c0", "c1", "c2"},
-          {fromKindToScalerType(GetParam().valueType),
-           fromKindToScalerType(GetParam().comparisonType),
+          {createScalarType(GetParam().valueType),
+           createScalarType(GetParam().comparisonType),
            INTEGER()});
 
   const bool isSmallInt = GetParam().comparisonType == TypeKind::TINYINT ||
@@ -1081,7 +1085,7 @@ TEST_P(
   for (int i = 0; i < kNumBatches; ++i) {
     // Generate a non-lazy vector so that it can be written out as a duckDB
     // table.
-    auto valueVector = fuzzer.fuzz(fromKindToScalerType(GetParam().valueType));
+    auto valueVector = fuzzer.fuzz(createScalarType(GetParam().valueType));
     auto groupByVector = makeFlatVector<int32_t>(kBatchSize);
     auto comparisonVector = buildDataVector(
         GetParam().comparisonType,
@@ -1214,6 +1218,144 @@ TEST_F(MinMaxByComplexTypes, mapGroupBy) {
       {data}, {"c0"}, {"min_by(c1, c2)", "max_by(c1, c2)"}, {expected});
 }
 
+TEST_F(MinMaxByComplexTypes, arrayCompare) {
+  auto expected = makeRowVector({
+      makeArrayVector<int64_t>({
+          {1, 2, 3},
+      }),
+      makeArrayVector<int64_t>({
+          {6, 7, 8},
+      }),
+  });
+  auto data = makeRowVector({
+      makeArrayVector<int64_t>({
+          {1, 2, 3},
+          {4, 5},
+          {6, 7, 8},
+      }),
+      makeNullableArrayVector<int64_t>({
+          {1, 2, 3},
+          {3, 4, 5},
+          {6, 7, 8},
+      }),
+  });
+  testAggregations(
+      {data}, {}, {"min_by(c0, c1)", "max_by(c0, c1)"}, {expected});
+}
+
+TEST_F(MinMaxByComplexTypes, rowCompare) {
+  auto data = makeRowVector({
+      makeArrayVector<int64_t>({
+          {1, 2, 3},
+          {4, 5},
+          {6, 7, 8},
+      }),
+      makeRowVector({makeNullableFlatVector<int32_t>({1, 2, 3})}),
+  });
+
+  auto expected = makeRowVector({
+      makeArrayVector<int64_t>({
+          {1, 2, 3},
+      }),
+      makeArrayVector<int64_t>({
+          {6, 7, 8},
+      }),
+  });
+
+  testAggregations(
+      {data}, {}, {"min_by(c0, c1)", "max_by(c0, c1)"}, {expected});
+}
+
+TEST_F(MinMaxByComplexTypes, arrayCheckNulls) {
+  auto batch = makeRowVector({
+      makeFlatVector<int32_t>({1, 2, 3}),
+      makeArrayVectorFromJson<int32_t>({
+          "[1, 2]",
+          "[6, 7]",
+          "[2, 3]",
+      }),
+      makeFlatVector<int32_t>({1, 2, 3}),
+  });
+
+  auto batchWithNull = makeRowVector({
+      makeFlatVector<int32_t>({1, 2, 3}),
+      makeArrayVectorFromJson<int32_t>({
+          "[1, 2]",
+          "[6, 7]",
+          "[3, null]",
+      }),
+      makeFlatVector<int32_t>({1, 2, 3}),
+  });
+
+  for (const auto& expr : {"min_by(c0, c1)", "max_by(c0, c1)"}) {
+    testFailingAggregations(
+        {batch, batchWithNull},
+        {},
+        {expr},
+        "ARRAY comparison not supported for values that contain nulls");
+    testFailingAggregations(
+        {batch, batchWithNull},
+        {"c2"},
+        {expr},
+        "ARRAY comparison not supported for values that contain nulls");
+  }
+}
+
+TEST_F(MinMaxByComplexTypes, rowCheckNull) {
+  auto batch = makeRowVector({
+      makeFlatVector<int8_t>({1, 2, 3}),
+      makeRowVector(
+          {makeFlatVector<std::string>({"a", "b", "c"}),
+           makeFlatVector<std::string>({"aa", "bb", "cc"})}),
+      makeFlatVector<int8_t>({1, 2, 3}),
+  });
+
+  auto batchWithNull = makeRowVector({
+      makeFlatVector<int8_t>({1, 2, 3}),
+      makeRowVector({
+          makeFlatVector<std::string>({"a", "b", "c"}),
+          makeNullableFlatVector<std::string>({"aa", std::nullopt, "cc"}),
+      }),
+      makeFlatVector<int8_t>({1, 2, 3}),
+  });
+
+  for (const auto& expr : {"min_by(c0, c1)", "max_by(c0, c1)"}) {
+    testFailingAggregations(
+        {batch, batchWithNull},
+        {},
+        {expr},
+        "ROW comparison not supported for values that contain nulls");
+    testFailingAggregations(
+        {batch, batchWithNull},
+        {"c2"},
+        {expr},
+        "ROW comparison not supported for values that contain nulls");
+  }
+}
+
+TEST_F(MinMaxByComplexTypes, failOnUnorderableType) {
+  auto data = makeRowVector({
+      makeFlatVector<int32_t>({1, 2, 3, 4, 5}),
+      makeAllNullMapVector(5, VARCHAR(), BIGINT()),
+      makeFlatVector<int32_t>({1, 2, 3, 4, 5}),
+  });
+
+  static const std::string kErrorMessage =
+      "Aggregate function signature is not supported";
+  for (const auto& expr : {"min_by(c0, c1)", "min_by(c0, c1)"}) {
+    {
+      auto builder = PlanBuilder().values({data});
+      VELOX_ASSERT_THROW(builder.singleAggregation({}, {expr}), kErrorMessage);
+    }
+
+    {
+      auto builder = PlanBuilder().values({data});
+      VELOX_ASSERT_THROW(
+          builder.singleAggregation({"c2"}, {expr}), kErrorMessage);
+    }
+  }
+}
+
 class MinMaxByNTest : public AggregationTestBase {
  protected:
   void SetUp() override {
@@ -1335,6 +1477,42 @@ TEST_F(MinMaxByNTest, globalWithNullCompare) {
       {data}, {}, {"min_by(c0, c1, 3)", "max_by(c0, c1, 4)"}, {expected});
 }
 
+TEST_F(MinMaxByNTest, globalWithNullN) {
+  // Rows with null 'compare' should be ignored.
+  auto data = makeRowVector(
+      {makeFlatVector<int32_t>({1, 2, 3, 4, 5, 6, 7}),
+       makeFlatVector<int64_t>({77, 66, 55, 44, 33, 22, 11}),
+       makeNullableFlatVector<int64_t>(
+           {3, std::nullopt, 3, 3, 3, std::nullopt, 3})});
+
+  auto expected = makeRowVector({
+      makeArrayVector<int32_t>({
+          {7, 5, 4},
+      }),
+      makeArrayVector<int32_t>({
+          {1, 3, 4},
+      }),
+  });
+
+  testAggregations(
+      {data}, {}, {"min_by(c0, c1, c2)", "max_by(c0, c1, c2)"}, {expected});
+
+  // All 'N' are null.
+  data = makeRowVector({
+      makeFlatVector<int32_t>({1, 2, 3, 4, 5, 6, 7}),
+      makeFlatVector<int64_t>({77, 66, 55, 44, 33, 22, 11}),
+      makeNullConstant(TypeKind::BIGINT, 7),
+  });
+
+  expected = makeRowVector({
+      makeAllNullArrayVector(1, INTEGER()),
+      makeAllNullArrayVector(1, INTEGER()),
+  });
+
+  testAggregations(
+      {data}, {}, {"min_by(c0, c1, c2)", "max_by(c0, c1, c2)"}, {expected});
+}
+
 TEST_F(MinMaxByNTest, sortedGlobal) {
   auto data = makeRowVector({
       makeFlatVector<int32_t>({1, 2, 3, 4, 5, 6, 7}),
@@ -1406,10 +1584,13 @@ TEST_F(MinMaxByNTest, groupBy) {
       {data}, {"c0"}, {"min_by(c1, c2, 3)", "max_by(c1, c2, 4)"}, {expected});
 
   // bool type of comparison
+  // Make input size at least 8 to ensure drivers get 2 input batches for
+  // spilling when tested with data read from files.
   data = makeRowVector({
-      makeFlatVector<int16_t>({1, 2, 1, 2}),
-      makeFlatVector<int32_t>({1, 2, 3, 4}),
-      makeFlatVector<bool>({true, false, false, true}),
+      makeFlatVector<int16_t>({1, 2, 1, 2, 1, 2, 1, 2}),
+      makeFlatVector<int32_t>({1, 2, 3, 4, 1, 2, 3, 4}),
+      makeFlatVector<bool>(
+          {true, false, false, true, true, false, false, true}),
   });
 
   expected = makeRowVector({
@@ -1498,6 +1679,56 @@ TEST_F(MinMaxByNTest, groupByWithNullCompare) {
       {data}, {"c0"}, {"min_by(c1, c2, 3)", "max_by(c1, c2, 4)"}, {expected});
 }
 
+TEST_F(MinMaxByNTest, groupByWithNullN) {
+  // Rows with null 'N' should be ignored.
+  auto data = makeRowVector({
+      makeFlatVector<int16_t>({1, 2, 1, 2, 1, 2, 1}),
+      makeFlatVector<int32_t>({1, 2, 3, 4, 5, 6, 7}),
+      makeFlatVector<int64_t>({77, 66, 55, 44, 33, 22, 11}),
+      makeNullableFlatVector<int64_t>(
+          {3, std::nullopt, 3, 3, std::nullopt, 3, 3}),
+  });
+
+  auto expected = makeRowVector({
+      makeFlatVector<int16_t>({1, 2}),
+      makeArrayVector<int32_t>({
+          {7, 3, 1},
+          {6, 4},
+      }),
+      makeArrayVector<int32_t>({
+          {1, 3, 7},
+          {4, 6},
+      }),
+  });
+
+  testAggregations(
+      {data}, {"c0"}, {"min_by(c1, c2, c3)", "max_by(c1, c2, c3)"}, {expected});
+
+  // All 'N' values are null for one group.
+  data = makeRowVector({
+      makeFlatVector<int16_t>({1, 2, 1, 2, 1, 2, 1}),
+      makeFlatVector<int32_t>({1, 2, 3, 4, 5, 6, 7}),
+      makeFlatVector<int64_t>({77, 66, 55, 44, 33, 22, 11}),
+      makeNullableFlatVector<int64_t>(
+          {3, std::nullopt, 3, std::nullopt, std::nullopt, std::nullopt, 3}),
+  });
+
+  expected = makeRowVector({
+      makeFlatVector<int16_t>({1, 2}),
+      makeNullableArrayVector<int32_t>({
+          {{7, 3, 1}},
+          std::nullopt,
+      }),
+      makeNullableArrayVector<int32_t>({
+          {{1, 3, 7}},
+          std::nullopt,
+      }),
+  });
+
+  testAggregations(
+      {data}, {"c0"}, {"min_by(c1, c2, c3)", "max_by(c1, c2, c3)"}, {expected});
+}
+
 TEST_F(MinMaxByNTest, sortedGroupBy) {
   auto data = makeRowVector({
       makeFlatVector<int16_t>({1, 1, 2, 2, 1, 2, 1}),
@@ -1524,6 +1755,10 @@ TEST_F(MinMaxByNTest, sortedGroupBy) {
 }
 
 TEST_F(MinMaxByNTest, variableN) {
+  // Tests below check the error behavior on invalid inputs, so testIncremental
+  // is not needed for these cases.
+  AggregationTestBase::disableTestIncremental();
+
   auto data = makeRowVector({
       makeFlatVector<int32_t>({1, 2, 3, 4, 5, 6, 7}),
       makeFlatVector<int64_t>({77, 66, 55, 44, 33, 22, 11}),
@@ -1579,6 +1814,8 @@ TEST_F(MinMaxByNTest, variableN) {
   VELOX_ASSERT_THROW(
       AssertQueryBuilder(plan).copyResults(pool()),
       "third argument of max_by/min_by must be a constant for all rows in a group");
+
+  AggregationTestBase::enableTestIncremental();
 }
 
 TEST_F(MinMaxByNTest, globalRow) {
@@ -1868,6 +2105,91 @@ TEST_F(MinMaxByNTest, stringComparison) {
         {data}, {"c4"}, {"min_by(c3, c0, 2)", "max_by(c3, c0, 2)"}, {expected});
     testReadFromFiles(
         {data}, {"c4"}, {"min_by(c3, c0, 2)", "max_by(c3, c0, 2)"}, {expected});
+  }
+}
+
+TEST_F(MinMaxByNTest, incrementalWindow) {
+  // Test that min_by(x, x, 10) and max_by(x, x, 10) produce correct results
+  // when used in window operation with incremental frames.
+  std::vector<VectorPtr> inputs = {
+      makeFlatVector<int64_t>({1, 2}),
+      makeFlatVector<StringView>({"1"_sv, "2"_sv}),
+      makeArrayVector<StringView>({{"1"_sv}, {"2"_sv}}),
+      makeFlatVector<Timestamp>({Timestamp(0, 0), Timestamp(0, 1)}),
+      makeFlatVector<int64_t>({10, 10}),
+      makeFlatVector<bool>({false, false}),
+      makeFlatVector<int64_t>({0, 1})};
+  auto data = makeRowVector(inputs);
+  auto result = inputs;
+
+  // Test primitive type.
+  {
+    auto plan =
+        PlanBuilder()
+            .values({data})
+            .window(
+                {"max_by(c0, c0, c4) over (partition by c5 order by c6 asc)"})
+            .planNode();
+
+    result.push_back(makeArrayVector<int64_t>({{1}, {2, 1}}));
+    AssertQueryBuilder(plan).assertResults(makeRowVector(result));
+
+    plan =
+        PlanBuilder()
+            .values({data})
+            .window(
+                {"min_by(c0, c0, c4) over (partition by c5 order by c6 asc)"})
+            .planNode();
+    result.back() = makeArrayVector<int64_t>({{1}, {1, 2}});
+    AssertQueryBuilder(plan).assertResults(makeRowVector(result));
+  }
+
+  // Test varchar type.
+  {
+    auto plan =
+        PlanBuilder()
+            .values({data})
+            .window(
+                {"max_by(c1, c1, c4) over (partition by c5 order by c6 asc)"})
+            .planNode();
+
+    result.back() = makeArrayVector<StringView>({{"1"_sv}, {"2"_sv, "1"_sv}});
+    AssertQueryBuilder(plan).assertResults(makeRowVector(result));
+
+    plan =
+        PlanBuilder()
+            .values({data})
+            .window(
+                {"min_by(c1, c1, c4) over (partition by c5 order by c6 asc)"})
+            .planNode();
+
+    result.back() = makeArrayVector<StringView>({{"1"_sv}, {"1"_sv, "2"_sv}});
+    AssertQueryBuilder(plan).assertResults(makeRowVector(result));
+  }
+
+  // Test complex type.
+  {
+    auto plan =
+        PlanBuilder()
+            .values({data})
+            .window(
+                {"max_by(c2, c3, c4) over (partition by c5 order by c6 asc)"})
+            .planNode();
+
+    result.back() = makeNullableNestedArrayVector<StringView>(
+        {{{{{"1"_sv}}}}, {{{{"2"_sv}}, {{"1"_sv}}}}});
+    AssertQueryBuilder(plan).assertResults(makeRowVector(result));
+
+    plan =
+        PlanBuilder()
+            .values({data})
+            .window(
+                {"min_by(c2, c3, c4) over (partition by c5 order by c6 asc)"})
+            .planNode();
+
+    result.back() = makeNullableNestedArrayVector<StringView>(
+        {{{{{"1"_sv}}}}, {{{{"1"_sv}}, {{"2"_sv}}}}});
+    AssertQueryBuilder(plan).assertResults(makeRowVector(result));
   }
 }
 

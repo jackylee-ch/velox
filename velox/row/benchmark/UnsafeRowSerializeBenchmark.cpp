@@ -99,8 +99,7 @@ class SerializeBenchmark {
 
     auto copy = BaseVector::create(rowType, data->size(), pool());
 
-    ByteStream in;
-    HashStringAllocator::prepareRead(position.header, in);
+    auto in = HashStringAllocator::prepareRead(position.header);
     for (auto i = 0; i < data->size(); ++i) {
       exec::ContainerRowSerde::deserialize(in, i, copy.get());
     }
@@ -188,10 +187,11 @@ class SerializeBenchmark {
   HashStringAllocator::Position serialize(
       const RowVectorPtr& data,
       HashStringAllocator& allocator) {
-    ByteStream out(&allocator);
+    ByteOutputStream out(&allocator);
     auto position = allocator.newWrite(out);
+    const exec::ContainerRowSerdeOptions options{};
     for (auto i = 0; i < data->size(); ++i) {
-      exec::ContainerRowSerde::serialize(*data, i, out);
+      exec::ContainerRowSerde::serialize(*data, i, out, options);
     }
     allocator.finishWrite(out, 0);
     return position;
@@ -201,7 +201,8 @@ class SerializeBenchmark {
     return pool_.get();
   }
 
-  std::shared_ptr<memory::MemoryPool> pool_{memory::addDefaultLeafMemoryPool()};
+  std::shared_ptr<memory::MemoryPool> pool_{
+      memory::memoryManager()->addLeafPool()};
 };
 
 #define SERDE_BENCHMARKS(name, rowType)      \
@@ -262,6 +263,16 @@ SERDE_BENCHMARKS(
         DOUBLE(), DOUBLE(), DOUBLE(), DOUBLE(), BIGINT(), BIGINT(),
     }));
 
+BENCHMARK(decimalsSerialize) {
+  SerializeBenchmark benchmark;
+  benchmark.serializeUnsafe(ROW({BIGINT(), DECIMAL(12, 2), DECIMAL(38, 18)}));
+}
+
+BENCHMARK(decimalsDeserialize) {
+  SerializeBenchmark benchmark;
+  benchmark.deserializeUnsafe(ROW({BIGINT(), DECIMAL(12, 2), DECIMAL(38, 18)}));
+}
+
 SERDE_BENCHMARKS(strings1, ROW({BIGINT(), VARCHAR()}));
 
 SERDE_BENCHMARKS(
@@ -289,7 +300,8 @@ SERDE_BENCHMARKS(
 } // namespace facebook::velox::row
 
 int main(int argc, char** argv) {
-  folly::init(&argc, &argv);
+  folly::Init init{&argc, &argv};
+  facebook::velox::memory::MemoryManager::initialize({});
   folly::runBenchmarks();
   return 0;
 }

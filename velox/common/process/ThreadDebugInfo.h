@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <functional>
 #include <string>
 
 namespace facebook::velox::process {
@@ -25,6 +26,8 @@ namespace facebook::velox::process {
 struct ThreadDebugInfo {
   std::string queryId_;
   std::string taskId_;
+  // Callback to invoke when the debug info is to be dumped. Can be empty.
+  std::function<void()> callback_;
 };
 
 // A RAII class to store thread local debug information.
@@ -44,9 +47,9 @@ const ThreadDebugInfo* GetThreadDebugInfo();
 
 // Install a signal handler to dump thread local debug information. This should
 // be called before calling folly::symbolizer::installFatalSignalCallbacks()
-// which is usually called at startup via folly::Init(). This is just a default
-// implementation but you can install your own signal handler. Make sure to
-// install one at the start of your program.
+// which is usually called at startup via folly::Init init{}. This is just a
+// default implementation but you can install your own signal handler. Make sure
+// to install one at the start of your program.
 void addDefaultFatalSignalHandler();
 
 } // namespace facebook::velox::process

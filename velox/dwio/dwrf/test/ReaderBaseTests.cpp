@@ -48,8 +48,12 @@ void addStats(
 
 class EncryptedStatsTest : public Test {
  protected:
+  static void SetUpTestCase() {
+    MemoryManager::testingSetInstance({});
+  }
+
   void SetUp() override {
-    pool_ = defaultMemoryManager().addRootPool("EncryptedStatsTest");
+    pool_ = memoryManager()->addRootPool("EncryptedStatsTest");
     sinkPool_ = pool_->addLeafChild("sink");
     ProtoWriter writer{pool_, *sinkPool_};
     auto& context = const_cast<const ProtoWriter&>(writer).getContext();
@@ -57,10 +61,10 @@ class EncryptedStatsTest : public Test {
     // fake post script
     proto::PostScript ps;
     ps.set_compression(
-        static_cast<proto::CompressionKind>(context.compression));
-    if (context.compression !=
+        static_cast<proto::CompressionKind>(context.compression()));
+    if (context.compression() !=
         facebook::velox::common::CompressionKind::CompressionKind_NONE) {
-      ps.set_compressionblocksize(context.compressionBlockSize);
+      ps.set_compressionblocksize(context.compressionBlockSize());
     }
 
     // fake footer
@@ -173,8 +177,8 @@ TEST_F(EncryptedStatsTest, getColumnStatisticsKeyNotLoaded) {
 std::unique_ptr<ReaderBase> createCorruptedFileReader(
     uint64_t footerLen,
     uint32_t cacheLen) {
-  auto pool = facebook::velox::memory::addDefaultLeafMemoryPool();
-  MemorySink sink{*pool, 1024};
+  auto pool = facebook::velox::memory::memoryManager()->addLeafPool();
+  MemorySink sink{1024, {.pool = pool.get()}};
   DataBufferHolder holder{*pool, 1024, 0, DEFAULT_PAGE_GROW_RATIO, &sink};
   BufferedOutputStream output{holder};
 
@@ -206,12 +210,19 @@ std::unique_ptr<ReaderBase> createCorruptedFileReader(
 
   sink.write(std::move(buf));
   auto readFile = std::make_shared<facebook::velox::InMemoryReadFile>(
-      std::string_view(sink.getData(), sink.size()));
+      std::string_view(sink.data(), sink.size()));
   return std::make_unique<ReaderBase>(
       *pool, std::make_unique<BufferedInput>(readFile, *pool));
 }
 
-TEST(ReaderBaseTest, InvalidPostScriptThrows) {
+class ReaderBaseTest : public Test {
+ protected:
+  static void SetUpTestCase() {
+    MemoryManager::testingSetInstance({});
+  }
+};
+
+TEST_F(ReaderBaseTest, InvalidPostScriptThrows) {
   EXPECT_THROW(
       { createCorruptedFileReader(1'000'000, 0); }, exception::LoggedException);
   EXPECT_THROW(

@@ -17,10 +17,11 @@
 #include <limits>
 #include "velox/exec/Aggregate.h"
 #include "velox/exec/AggregationHook.h"
-#include "velox/expression/FunctionSignature.h"
+#include "velox/functions/lib/CheckNestedNulls.h"
 #include "velox/functions/lib/aggregates/SimpleNumericAggregate.h"
 #include "velox/functions/lib/aggregates/SingleValueAccumulator.h"
 #include "velox/functions/prestosql/aggregates/AggregateNames.h"
+#include "velox/functions/prestosql/aggregates/Compare.h"
 
 using namespace facebook::velox::functions::aggregate;
 
@@ -44,6 +45,34 @@ class MinMaxAggregate : public SimpleNumericAggregate<T, T, T> {
 
   int32_t accumulatorAlignmentSize() const override {
     return 1;
+  }
+
+  bool supportsToIntermediate() const override {
+    return true;
+  }
+
+  void toIntermediate(
+      const SelectivityVector& rows,
+      std::vector<VectorPtr>& args,
+      VectorPtr& result) const override {
+    const auto& input = args[0];
+    if (rows.isAllSelected()) {
+      result = input;
+      return;
+    }
+
+    auto* pool = BaseAggregate::allocator_->pool();
+
+    result = BaseVector::create(input->type(), rows.size(), pool);
+
+    // Set result to NULL for rows that are masked out.
+    {
+      BufferPtr nulls = allocateNulls(rows.size(), pool, bits::kNull);
+      rows.clearNulls(nulls);
+      result->setNulls(nulls);
+    }
+
+    result->copy(input.get(), rows, nullptr);
   }
 
   void extractValues(char** groups, int32_t numGroups, VectorPtr* result)
@@ -105,6 +134,11 @@ class MaxAggregate : public MinMaxAggregate<T> {
       const SelectivityVector& rows,
       const std::vector<VectorPtr>& args,
       bool mayPushdown) override {
+    // Re-enable pushdown for TIMESTAMP after
+    // https://github.com/facebookincubator/velox/issues/6297 is fixed.
+    if (args[0]->typeKind() == TypeKind::TIMESTAMP) {
+      mayPushdown = false;
+    }
     if (mayPushdown && args[0]->isLazy()) {
       BaseAggregate::template pushdown<MinMaxHook<T, false>>(
           groups, rows, args[0]);
@@ -180,36 +214,16 @@ class MinAggregate : public MinMaxAggregate<T> {
     }
   }
 
-  bool supportsToIntermediate() const override {
-    return true;
-  }
-
-  void toIntermediate(
-      const SelectivityVector& rows,
-      std::vector<VectorPtr>& args,
-      VectorPtr& result) const override {
-    const auto& input = args[0];
-    if (rows.isAllSelected()) {
-      result = input;
-      return;
-    }
-
-    auto* pool = BaseAggregate::allocator_->pool();
-
-    result = BaseVector::create(input->type(), rows.size(), pool);
-    result->copy(input.get(), 0, 0, rows.size());
-
-    // Set result to NULL for rows that are masked out.
-    BufferPtr nulls = allocateNulls(rows.size(), pool, bits::kNull);
-    rows.clearNulls(nulls);
-    result->setNulls(nulls);
-  }
-
   void addRawInput(
       char** groups,
       const SelectivityVector& rows,
       const std::vector<VectorPtr>& args,
       bool mayPushdown) override {
+    // Re-enable pushdown for TIMESTAMP after
+    // https://github.com/facebookincubator/velox/issues/6297 is fixed.
+    if (args[0]->typeKind() == TypeKind::TIMESTAMP) {
+      mayPushdown = false;
+    }
     if (mayPushdown && args[0]->isLazy()) {
       BaseAggregate::template pushdown<MinMaxHook<T, true>>(
           groups, rows, args[0]);
@@ -267,8 +281,10 @@ const T MinAggregate<T>::kInitialValue_ = MinMaxTrait<T>::max();
 
 class NonNumericMinMaxAggregateBase : public exec::Aggregate {
  public:
-  explicit NonNumericMinMaxAggregateBase(const TypePtr& resultType)
-      : exec::Aggregate(resultType) {}
+  explicit NonNumericMinMaxAggregateBase(
+      const TypePtr& resultType,
+      bool throwOnNestedNulls)
+      : exec::Aggregate(resultType), throwOnNestedNulls_(throwOnNestedNulls) {}
 
   int32_t accumulatorFixedWidthSize() const override {
     return sizeof(SingleValueAccumulator);
@@ -292,6 +308,16 @@ class NonNumericMinMaxAggregateBase : public exec::Aggregate {
       std::vector<VectorPtr>& args,
       VectorPtr& result) const override {
     const auto& input = args[0];
+
+    if (throwOnNestedNulls_) {
+      DecodedVector decoded(*input, rows, true);
+      auto indices = decoded.indices();
+      rows.applyToSelected([&](vector_size_t i) {
+        velox::functions::checkNestedNulls(
+            decoded, indices, i, throwOnNestedNulls_);
+      });
+    }
+
     if (rows.isAllSelected()) {
       result = input;
       return;
@@ -317,7 +343,7 @@ class NonNumericMinMaxAggregateBase : public exec::Aggregate {
 
     uint64_t* rawNulls = nullptr;
     if ((*result)->mayHaveNulls()) {
-      BufferPtr nulls = (*result)->mutableNulls((*result)->size());
+      BufferPtr& nulls = (*result)->mutableNulls((*result)->size());
       rawNulls = nulls->asMutable<uint64_t>();
     }
 
@@ -364,12 +390,14 @@ class NonNumericMinMaxAggregateBase : public exec::Aggregate {
     }
 
     rows.applyToSelected([&](vector_size_t i) {
-      if (decoded.isNullAt(i)) {
+      if (velox::functions::checkNestedNulls(
+              decoded, indices, i, throwOnNestedNulls_)) {
         return;
       }
+
       auto accumulator = value<SingleValueAccumulator>(groups[i]);
       if (!accumulator->hasValue() ||
-          compareTest(accumulator->compare(decoded, i))) {
+          compareTest(compare(accumulator, decoded, i))) {
         accumulator->write(baseVector, indices[i], allocator_);
       }
     });
@@ -386,14 +414,14 @@ class NonNumericMinMaxAggregateBase : public exec::Aggregate {
     auto baseVector = decoded.base();
 
     if (decoded.isConstantMapping()) {
-      if (decoded.isNullAt(0)) {
-        // nothing to do; all values are nulls
+      if (velox::functions::checkNestedNulls(
+              decoded, indices, 0, throwOnNestedNulls_)) {
         return;
       }
 
       auto accumulator = value<SingleValueAccumulator>(group);
       if (!accumulator->hasValue() ||
-          compareTest(accumulator->compare(decoded, 0))) {
+          compareTest(compare(accumulator, decoded, 0))) {
         accumulator->write(baseVector, indices[0], allocator_);
       }
       return;
@@ -401,21 +429,28 @@ class NonNumericMinMaxAggregateBase : public exec::Aggregate {
 
     auto accumulator = value<SingleValueAccumulator>(group);
     rows.applyToSelected([&](vector_size_t i) {
-      if (decoded.isNullAt(i)) {
+      if (velox::functions::checkNestedNulls(
+              decoded, indices, i, throwOnNestedNulls_)) {
         return;
       }
+
       if (!accumulator->hasValue() ||
-          compareTest(accumulator->compare(decoded, i))) {
+          compareTest(compare(accumulator, decoded, i))) {
         accumulator->write(baseVector, indices[i], allocator_);
       }
     });
   }
+
+ private:
+  const bool throwOnNestedNulls_;
 };
 
 class NonNumericMaxAggregate : public NonNumericMinMaxAggregateBase {
  public:
-  explicit NonNumericMaxAggregate(const TypePtr& resultType)
-      : NonNumericMinMaxAggregateBase(resultType) {}
+  explicit NonNumericMaxAggregate(
+      const TypePtr& resultType,
+      bool throwOnNestedNulls)
+      : NonNumericMinMaxAggregateBase(resultType, throwOnNestedNulls) {}
 
   void addRawInput(
       char** groups,
@@ -456,8 +491,10 @@ class NonNumericMaxAggregate : public NonNumericMinMaxAggregateBase {
 
 class NonNumericMinAggregate : public NonNumericMinMaxAggregateBase {
  public:
-  explicit NonNumericMinAggregate(const TypePtr& resultType)
-      : NonNumericMinMaxAggregateBase(resultType) {}
+  explicit NonNumericMinAggregate(
+      const TypePtr& resultType,
+      bool throwOnNestedNulls)
+      : NonNumericMinMaxAggregateBase(resultType, throwOnNestedNulls) {}
 
   void addRawInput(
       char** groups,
@@ -508,26 +545,33 @@ std::pair<vector_size_t*, vector_size_t*> rawOffsetAndSizes(
 template <typename T, typename Compare>
 struct MinMaxNAccumulator {
   int64_t n{0};
-  std::priority_queue<T, std::vector<T, StlAllocator<T>>, Compare> topValues;
+  std::vector<T, StlAllocator<T>> heapValues;
 
   explicit MinMaxNAccumulator(HashStringAllocator* allocator)
-      : topValues{Compare{}, StlAllocator<T>(allocator)} {}
+      : heapValues{StlAllocator<T>(allocator)} {}
 
   int64_t getN() const {
     return n;
   }
 
   size_t size() const {
-    return topValues.size();
+    return heapValues.size();
   }
 
   void checkAndSetN(DecodedVector& decodedN, vector_size_t row) {
-    VELOX_USER_CHECK(
-        !decodedN.isNullAt(row),
-        "second argument of max/min must be a positive integer");
+    // Skip null N.
+    if (decodedN.isNullAt(row)) {
+      return;
+    }
+
     const auto newN = decodedN.valueAt<int64_t>(row);
     VELOX_USER_CHECK_GT(
         newN, 0, "second argument of max/min must be a positive integer");
+
+    VELOX_USER_CHECK_LE(
+        newN,
+        10'000,
+        "second argument of max/min must be less than or equal to 10000");
 
     if (n) {
       VELOX_USER_CHECK_EQ(
@@ -540,25 +584,27 @@ struct MinMaxNAccumulator {
   }
 
   void compareAndAdd(T value, Compare& comparator) {
-    if (topValues.size() < n) {
-      topValues.push(value);
+    if (heapValues.size() < n) {
+      heapValues.push_back(value);
+      std::push_heap(heapValues.begin(), heapValues.end(), comparator);
     } else {
-      const auto& topValue = topValues.top();
+      const auto& topValue = heapValues.front();
       if (comparator(value, topValue)) {
-        topValues.pop();
-        topValues.push(value);
+        std::pop_heap(heapValues.begin(), heapValues.end(), comparator);
+        heapValues.back() = value;
+        std::push_heap(heapValues.begin(), heapValues.end(), comparator);
       }
     }
   }
 
-  /// Moves all values from 'topValues' into 'rawValues' buffer. The queue of
-  /// 'topValues' will be empty after this call.
-  void extractValues(T* rawValues, vector_size_t offset) {
-    const vector_size_t size = topValues.size();
-    for (auto i = size - 1; i >= 0; --i) {
-      rawValues[offset + i] = topValues.top();
-      topValues.pop();
+  /// Copy all values from 'topValues' into 'rawValues' buffer. The heap remains
+  /// unchanged after the call.
+  void extractValues(T* rawValues, vector_size_t offset, Compare& comparator) {
+    std::sort_heap(heapValues.begin(), heapValues.end(), comparator);
+    for (int64_t i = heapValues.size() - 1; i >= 0; --i) {
+      rawValues[offset + i] = heapValues[i];
     }
+    std::make_heap(heapValues.begin(), heapValues.end(), comparator);
   }
 };
 
@@ -597,7 +643,7 @@ class MinMaxNAggregateBase : public exec::Aggregate {
     decodedN_.decode(*args[1], rows);
 
     rows.applyToSelected([&](vector_size_t i) {
-      if (decodedValue_.isNullAt(i)) {
+      if (decodedValue_.isNullAt(i) || decodedN_.isNullAt(i)) {
         return;
       }
 
@@ -637,7 +683,8 @@ class MinMaxNAggregateBase : public exec::Aggregate {
 
     auto tracker = trackRowSize(group);
     rows.applyToSelected([&](vector_size_t i) {
-      if (!decodedValue_.isNullAt(i)) {
+      // Skip null value or N.
+      if (!decodedValue_.isNullAt(i) && !decodedN_.isNullAt(i)) {
         addRawInput(group, i);
       }
     });
@@ -701,9 +748,7 @@ class MinMaxNAggregateBase : public exec::Aggregate {
   }
 
   void destroy(folly::Range<char**> groups) override {
-    for (auto group : groups) {
-      std::destroy_at(value(group));
-    }
+    destroyAccumulators<AccumulatorType>(groups);
   }
 
  private:
@@ -732,7 +777,7 @@ class MinMaxNAggregateBase : public exec::Aggregate {
         if (rawNs != nullptr) {
           rawNs[i] = accumulator->n;
         }
-        accumulator->extractValues(rawValues, offset);
+        accumulator->extractValues(rawValues, offset, comparator_);
 
         offset += size;
       }
@@ -861,10 +906,13 @@ template <
     typename TNonNumeric,
     template <typename T>
     class TNumericN>
-exec::AggregateRegistrationResult registerMinMax(const std::string& name) {
+exec::AggregateRegistrationResult registerMinMax(
+    const std::string& name,
+    bool withCompanionFunctions,
+    bool overwrite) {
   std::vector<std::shared_ptr<exec::AggregateFunctionSignature>> signatures;
   signatures.push_back(exec::AggregateFunctionSignatureBuilder()
-                           .typeVariable("T")
+                           .orderableTypeVariable("T")
                            .returnType("T")
                            .intermediateType("T")
                            .argumentType("T")
@@ -890,8 +938,8 @@ exec::AggregateRegistrationResult registerMinMax(const std::string& name) {
           const TypePtr& resultType,
           const core::QueryConfig& /*config*/)
           -> std::unique_ptr<exec::Aggregate> {
-        const bool nAgg = (argTypes.size() == 2) ||
-            (argTypes.size() == 1 && argTypes[0]->size() == 2);
+        const bool nAgg = !resultType->equivalent(*argTypes[0]);
+        const bool throwOnNestedNulls = velox::exec::isRawInput(step);
 
         if (nAgg) {
           // We have either 2 arguments: T, bigint (partial aggregation)
@@ -946,11 +994,17 @@ exec::AggregateRegistrationResult registerMinMax(const std::string& name) {
               return std::make_unique<TNumeric<Timestamp>>(resultType);
             case TypeKind::HUGEINT:
               return std::make_unique<TNumeric<int128_t>>(resultType);
+            case TypeKind::VARBINARY:
+              [[fallthrough]];
             case TypeKind::VARCHAR:
+              return std::make_unique<TNonNumeric>(inputType, false);
             case TypeKind::ARRAY:
+              [[fallthrough]];
             case TypeKind::MAP:
+              [[fallthrough]];
             case TypeKind::ROW:
-              return std::make_unique<TNonNumeric>(inputType);
+              return std::make_unique<TNonNumeric>(
+                  inputType, throwOnNestedNulls);
             default:
               VELOX_CHECK(
                   false,
@@ -959,16 +1013,22 @@ exec::AggregateRegistrationResult registerMinMax(const std::string& name) {
                   inputType->kindName());
           }
         }
-      });
+      },
+      {false /*orderSensitive*/},
+      withCompanionFunctions,
+      overwrite);
 }
 
 } // namespace
 
-void registerMinMaxAggregates(const std::string& prefix) {
+void registerMinMaxAggregates(
+    const std::string& prefix,
+    bool withCompanionFunctions,
+    bool overwrite) {
   registerMinMax<MinAggregate, NonNumericMinAggregate, MinNAggregate>(
-      prefix + kMin);
+      prefix + kMin, withCompanionFunctions, overwrite);
   registerMinMax<MaxAggregate, NonNumericMaxAggregate, MaxNAggregate>(
-      prefix + kMax);
+      prefix + kMax, withCompanionFunctions, overwrite);
 }
 
 } // namespace facebook::velox::aggregate::prestosql

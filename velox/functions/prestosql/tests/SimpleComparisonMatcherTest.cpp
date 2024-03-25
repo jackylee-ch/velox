@@ -29,6 +29,10 @@ namespace {
 class SimpleComparisonMatcherTest : public testing::Test,
                                     public test::VectorTestBase {
  protected:
+  static void SetUpTestCase() {
+    memory::MemoryManager::testingSetInstance({});
+  }
+
   void SetUp() override {
     functions::prestosql::registerAllScalarFunctions(prefix_);
     parse::registerTypeResolver();
@@ -95,10 +99,10 @@ TEST_F(SimpleComparisonMatcherTest, basic) {
     if (lessThan.has_value()) {
       ASSERT_EQ(lessThan.value(), comparison->isLessThen);
 
-      auto field = dynamic_cast<const core::FieldAccessTypedExpr*>(
+      auto field = dynamic_cast<const core::DereferenceTypedExpr*>(
           comparison->expr.get());
       ASSERT_TRUE(field != nullptr);
-      ASSERT_EQ("f", field->name());
+      ASSERT_EQ(0, field->index());
     }
   };
 

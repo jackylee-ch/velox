@@ -44,12 +44,25 @@ struct SparkComparator {
     } else {
       if constexpr (sparkGreaterThan) {
         return !accumulator->hasValue() ||
-            (accumulator->compare(newComparisons, index) <= 0);
+            compare(accumulator, newComparisons, index) <= 0;
       } else {
         return !accumulator->hasValue() ||
-            (accumulator->compare(newComparisons, index) >= 0);
+            compare(accumulator, newComparisons, index) >= 0;
       }
     }
+  }
+
+  FOLLY_ALWAYS_INLINE static int32_t compare(
+      const SingleValueAccumulator* accumulator,
+      const DecodedVector& decoded,
+      vector_size_t index) {
+    static const CompareFlags kCompareFlags{
+        true, // nullsFirst
+        true, // ascending
+        false, // equalsOnly
+        CompareFlags::NullHandlingMode::kNullAsValue};
+    auto result = accumulator->compare(decoded, index, kCompareFlags);
+    return result.value();
   }
 };
 
@@ -73,7 +86,20 @@ template <
         class C>
     class Aggregate,
     bool isMaxFunc>
-exec::AggregateRegistrationResult registerMinMaxBy(const std::string& name) {
+exec::AggregateRegistrationResult registerMinMaxBy(
+    const std::string& name,
+    bool withCompanionFunctions,
+    bool overwrite) {
+  std::vector<std::shared_ptr<exec::AggregateFunctionSignature>> signatures;
+  // V, C -> row(V, C) -> V.
+  signatures.push_back(exec::AggregateFunctionSignatureBuilder()
+                           .typeVariable("V")
+                           .typeVariable("C")
+                           .returnType("V")
+                           .intermediateType("row(V,C)")
+                           .argumentType("V")
+                           .argumentType("C")
+                           .build());
   const std::vector<std::string> supportedCompareTypes = {
       "boolean",
       "tinyint",
@@ -85,19 +111,6 @@ exec::AggregateRegistrationResult registerMinMaxBy(const std::string& name) {
       "varchar",
       "date",
       "timestamp"};
-
-  std::vector<std::shared_ptr<exec::AggregateFunctionSignature>> signatures;
-  for (const auto& compareType : supportedCompareTypes) {
-    // V, C -> row(V, C) -> V.
-    signatures.push_back(
-        exec::AggregateFunctionSignatureBuilder()
-            .typeVariable("T")
-            .returnType("T")
-            .intermediateType(fmt::format("row(T,{})", compareType))
-            .argumentType("T")
-            .argumentType(compareType)
-            .build());
-  }
 
   return exec::registerAggregateFunction(
       name,
@@ -127,14 +140,21 @@ exec::AggregateRegistrationResult registerMinMaxBy(const std::string& name) {
           return create<Aggregate, SparkComparator, isMaxFunc>(
               resultType, valueType, compareType, errorMessage);
         }
-      });
+      },
+      withCompanionFunctions,
+      overwrite);
 }
 
 } // namespace
 
-void registerMinMaxByAggregates(const std::string& prefix) {
-  registerMinMaxBy<MinMaxByAggregateBase, true>(prefix + "max_by");
-  registerMinMaxBy<MinMaxByAggregateBase, false>(prefix + "min_by");
+void registerMinMaxByAggregates(
+    const std::string& prefix,
+    bool withCompanionFunctions,
+    bool overwrite) {
+  registerMinMaxBy<MinMaxByAggregateBase, true>(
+      prefix + "max_by", withCompanionFunctions, overwrite);
+  registerMinMaxBy<MinMaxByAggregateBase, false>(
+      prefix + "min_by", withCompanionFunctions, overwrite);
 }
 
 } // namespace facebook::velox::functions::aggregate::sparksql

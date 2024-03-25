@@ -27,6 +27,12 @@
 
 namespace facebook::velox {
 
+#define RETURN_IF_ERROR(func, result) \
+  result = func;                      \
+  if (result < 0) {                   \
+    return result;                    \
+  }
+
 std::string ReadFile::pread(uint64_t offset, uint64_t length) const {
   std::string buf;
   buf.resize(length);
@@ -45,7 +51,8 @@ uint64_t ReadFile::preadv(
   }
   for (auto& range : buffers) {
     auto copySize = std::min<size_t>(range.size(), fileSize - offset);
-    if (range.data()) {
+    // NOTE: skip the gap in case of coalesce io.
+    if (range.data() != nullptr) {
       pread(offset, copySize, range.data());
     }
     offset += copySize;
@@ -83,19 +90,30 @@ void InMemoryWriteFile::append(std::string_view data) {
   file_->append(data);
 }
 
+void InMemoryWriteFile::append(std::unique_ptr<folly::IOBuf> data) {
+  for (auto rangeIter = data->begin(); rangeIter != data->end(); ++rangeIter) {
+    file_->append(
+        reinterpret_cast<const char*>(rangeIter->data()), rangeIter->size());
+  }
+}
+
 uint64_t InMemoryWriteFile::size() const {
   return file_->size();
 }
 
 LocalReadFile::LocalReadFile(std::string_view path) : path_(path) {
   fd_ = open(path_.c_str(), O_RDONLY);
-  VELOX_CHECK_GE(
-      fd_,
-      0,
-      "open failure in LocalReadFile constructor, {} {} {}.",
-      fd_,
-      path,
-      folly::errnoStr(errno));
+  if (fd_ < 0) {
+    if (errno == ENOENT) {
+      VELOX_FILE_NOT_FOUND_ERROR("No such file or directory: {}", path);
+    } else {
+      VELOX_FAIL(
+          "open failure in LocalReadFile constructor, {} {} {}.",
+          fd_,
+          path,
+          folly::errnoStr(errno));
+    }
+  }
   const off_t rc = lseek(fd_, 0, SEEK_END);
   VELOX_CHECK_GE(
       rc,
@@ -141,21 +159,54 @@ uint64_t LocalReadFile::preadv(
   // Dropped bytes sized so that a typical dropped range of 50K is not
   // too many iovecs.
   static thread_local std::vector<char> droppedBytes(16 * 1024);
+  uint64_t totalBytesRead = 0;
   std::vector<struct iovec> iovecs;
   iovecs.reserve(buffers.size());
+
+  auto readvFunc = [&]() -> ssize_t {
+    const auto bytesRead =
+        folly::preadv(fd_, iovecs.data(), iovecs.size(), offset);
+    if (bytesRead < 0) {
+      LOG(ERROR) << "preadv failed with error: " << folly::errnoStr(errno);
+    } else {
+      totalBytesRead += bytesRead;
+      offset += bytesRead;
+    }
+    iovecs.clear();
+    return bytesRead;
+  };
+
   for (auto& range : buffers) {
     if (!range.data()) {
       auto skipSize = range.size();
       while (skipSize) {
         auto bytes = std::min<size_t>(droppedBytes.size(), skipSize);
+
+        if (iovecs.size() >= IOV_MAX) {
+          ssize_t bytesRead{0};
+          RETURN_IF_ERROR(readvFunc(), bytesRead);
+        }
+
         iovecs.push_back({droppedBytes.data(), bytes});
         skipSize -= bytes;
       }
     } else {
+      if (iovecs.size() >= IOV_MAX) {
+        ssize_t bytesRead{0};
+        RETURN_IF_ERROR(readvFunc(), bytesRead);
+      }
+
       iovecs.push_back({range.data(), range.size()});
     }
   }
-  return folly::preadv(fd_, iovecs.data(), iovecs.size(), offset);
+
+  // Perform any remaining preadv calls
+  if (!iovecs.empty()) {
+    ssize_t bytesRead{0};
+    RETURN_IF_ERROR(readvFunc(), bytesRead);
+  }
+
+  return totalBytesRead;
 }
 
 uint64_t LocalReadFile::size() const {
@@ -193,8 +244,8 @@ LocalWriteFile::LocalWriteFile(
           path);
     }
   }
-  auto file = fopen(buf.get(), "ab");
-  VELOX_CHECK(
+  auto* file = fopen(buf.get(), "ab");
+  VELOX_CHECK_NOT_NULL(
       file,
       "fopen failure in LocalWriteFile constructor, {} {}.",
       path,
@@ -214,13 +265,39 @@ LocalWriteFile::~LocalWriteFile() {
 
 void LocalWriteFile::append(std::string_view data) {
   VELOX_CHECK(!closed_, "file is closed");
-  const uint64_t bytes_written = fwrite(data.data(), 1, data.size(), file_);
+  const uint64_t bytesWritten = fwrite(data.data(), 1, data.size(), file_);
   VELOX_CHECK_EQ(
-      bytes_written,
+      bytesWritten,
       data.size(),
-      "fwrite failure in LocalWriteFile::append, {} vs {}.",
-      bytes_written,
-      data.size());
+      "fwrite failure in LocalWriteFile::append, {} vs {}: {}",
+      bytesWritten,
+      data.size(),
+      folly::errnoStr(errno));
+}
+
+void LocalWriteFile::append(std::unique_ptr<folly::IOBuf> data) {
+  VELOX_CHECK(!closed_, "file is closed");
+  uint64_t totalBytesWritten{0};
+  for (auto rangeIter = data->begin(); rangeIter != data->end(); ++rangeIter) {
+    const auto bytesToWrite = rangeIter->size();
+    const auto bytesWritten =
+        fwrite(rangeIter->data(), 1, rangeIter->size(), file_);
+    totalBytesWritten += bytesWritten;
+    if (bytesWritten != bytesToWrite) {
+      VELOX_FAIL(
+          "fwrite failure in LocalWriteFile::append, {} vs {}: {}",
+          bytesWritten,
+          bytesToWrite,
+          folly::errnoStr(errno));
+    }
+  }
+  const auto totalBytesToWrite = data->computeChainDataLength();
+  VELOX_CHECK_EQ(
+      totalBytesWritten,
+      totalBytesToWrite,
+      "Failure in LocalWriteFile::append, {} vs {}",
+      totalBytesWritten,
+      totalBytesToWrite);
 }
 
 void LocalWriteFile::flush() {

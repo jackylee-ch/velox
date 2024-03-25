@@ -55,8 +55,9 @@ getAggregateFunctionEntry(const std::string& name) {
 
 AggregateRegistrationResult registerAggregateFunction(
     const std::string& name,
-    std::vector<std::shared_ptr<AggregateFunctionSignature>> signatures,
-    AggregateFunctionFactory factory,
+    const std::vector<std::shared_ptr<AggregateFunctionSignature>>& signatures,
+    const AggregateFunctionFactory& factory,
+    const AggregateFunctionMetadata& metadata,
     bool registerCompanionFunctions,
     bool overwrite) {
   auto sanitizedName = sanitizeName(name);
@@ -64,15 +65,16 @@ AggregateRegistrationResult registerAggregateFunction(
 
   if (overwrite) {
     aggregateFunctions().withWLock([&](auto& aggregationFunctionMap) {
-      aggregationFunctionMap[sanitizedName] = {signatures, std::move(factory)};
+      aggregationFunctionMap[sanitizedName] = {
+          signatures, std::move(factory), metadata};
     });
     registered.mainFunction = true;
   } else {
     auto inserted =
         aggregateFunctions().withWLock([&](auto& aggregationFunctionMap) {
-          auto [_, inserted] = aggregationFunctionMap.insert(
-              {sanitizedName, {signatures, factory}});
-          return inserted;
+          auto [_, inserted_2] = aggregationFunctionMap.insert(
+              {sanitizedName, {signatures, factory, metadata}});
+          return inserted_2;
         });
     registered.mainFunction = inserted;
   }
@@ -96,6 +98,47 @@ AggregateRegistrationResult registerAggregateFunction(
             name, signatures, overwrite);
   }
   return registered;
+}
+
+AggregateRegistrationResult registerAggregateFunction(
+    const std::string& name,
+    const std::vector<std::shared_ptr<AggregateFunctionSignature>>& signatures,
+    const AggregateFunctionFactory& factory,
+    bool registerCompanionFunctions,
+    bool overwrite) {
+  return registerAggregateFunction(
+      name, signatures, factory, {}, registerCompanionFunctions, overwrite);
+}
+
+std::vector<AggregateRegistrationResult> registerAggregateFunction(
+    const std::vector<std::string>& names,
+    const std::vector<std::shared_ptr<AggregateFunctionSignature>>& signatures,
+    const AggregateFunctionFactory& factory,
+    bool registerCompanionFunctions,
+    bool overwrite) {
+  return registerAggregateFunction(
+      names, signatures, factory, {}, registerCompanionFunctions, overwrite);
+}
+
+std::vector<AggregateRegistrationResult> registerAggregateFunction(
+    const std::vector<std::string>& names,
+    const std::vector<std::shared_ptr<AggregateFunctionSignature>>& signatures,
+    const AggregateFunctionFactory& factory,
+    const AggregateFunctionMetadata& metadata,
+    bool registerCompanionFunctions,
+    bool overwrite) {
+  auto size = names.size();
+  std::vector<AggregateRegistrationResult> registrationResults{size};
+  for (int i = 0; i < size; ++i) {
+    registrationResults[i] = registerAggregateFunction(
+        names[i],
+        signatures,
+        factory,
+        metadata,
+        registerCompanionFunctions,
+        overwrite);
+  }
+  return registrationResults;
 }
 
 std::unordered_map<
@@ -265,6 +308,13 @@ TypePtr Aggregate::intermediateType(
         << toString(name, argTypes)
         << ". Supported signatures: " << toString(signatures.value()) << ".";
   VELOX_USER_FAIL(error.str());
+}
+
+void Aggregate::setLambdaExpressions(
+    std::vector<core::LambdaTypedExprPtr> lambdaExpressions,
+    std::shared_ptr<core::ExpressionEvaluator> expressionEvaluator) {
+  lambdaExpressions_ = std::move(lambdaExpressions);
+  expressionEvaluator_ = std::move(expressionEvaluator);
 }
 
 void Aggregate::setAllocatorInternal(HashStringAllocator* allocator) {

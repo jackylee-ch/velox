@@ -19,6 +19,7 @@ target_link_libraries(velox_temp_path velox_exception)
 add_library(
   velox_exec_test_lib
   AssertQueryBuilder.cpp
+  ArbitratorTestUtil.cpp
   Cursor.cpp
   HiveConnectorTestBase.cpp
   LocalExchangeSource.cpp
@@ -27,7 +28,8 @@ add_library(
   QueryAssertions.cpp
   SumNonPODAggregate.cpp
   TpchQueryBuilder.cpp
-  VectorTestUtil.cpp)
+  VectorTestUtil.cpp
+  PortUtil.cpp)
 
 target_link_libraries(
   velox_exec_test_lib

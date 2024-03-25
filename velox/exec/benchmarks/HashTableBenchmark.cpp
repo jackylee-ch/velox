@@ -560,9 +560,10 @@ class HashTableBenchmark : public VectorTestBase {
         << std::endl;
   }
 
-  std::shared_ptr<memory::MemoryPool> pool_{memory::addDefaultLeafMemoryPool()};
-  std::unique_ptr<test::VectorMaker> vectorMaker_{
-      std::make_unique<test::VectorMaker>(pool_.get())};
+  std::shared_ptr<memory::MemoryPool> pool_{
+      memory::memoryManager()->addLeafPool()};
+  std::unique_ptr<VectorMaker> vectorMaker_{
+      std::make_unique<VectorMaker>(pool_.get())};
   // Bitmap of positions in batches_ that end up in the table.
   std::vector<uint64_t> isInTable_;
   // Test payload, keys first.
@@ -611,14 +612,14 @@ void combineResults(
 } // namespace
 
 int main(int argc, char** argv) {
-  folly::init(&argc, &argv);
-  memory::MmapAllocator::Options options;
-  options.capacity = 10UL << 30;
+  folly::Init init{&argc, &argv};
+  memory::MemoryManagerOptions options;
+  options.useMmapAllocator = true;
+  options.allocatorCapacity = 10UL << 30;
   options.useMmapArena = true;
   options.mmapArenaCapacityRatio = 1;
+  memory::MemoryManager::initialize(options);
 
-  auto allocator = std::make_shared<memory::MmapAllocator>(options);
-  memory::MemoryAllocator::setDefaultInstance(allocator.get());
   auto bm = std::make_unique<HashTableBenchmark>();
   std::vector<HashTableBenchmarkRun> results;
 

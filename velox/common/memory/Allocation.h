@@ -46,6 +46,11 @@ struct AllocationTraits {
     return bits::roundUp(bytes, kPageSize) / kPageSize;
   }
 
+  /// Returns the round up page bytes.
+  FOLLY_ALWAYS_INLINE static uint64_t roundUpPageBytes(uint64_t bytes) {
+    return bits::roundUp(bytes, kPageSize);
+  }
+
   /// The number of pages in a huge page.
   FOLLY_ALWAYS_INLINE static MachinePageCount numPagesInHugePage() {
     VELOX_DCHECK_GE(kHugePageSize, kPageSize);
@@ -155,6 +160,9 @@ class Allocation {
     return numPages_ == 0;
   }
 
+  /// Moves the runs in 'from' to 'this'. 'from' is empty on return.
+  void appendMove(Allocation& from);
+
   std::string toString() const;
 
  private:
@@ -163,7 +171,7 @@ class Allocation {
     VELOX_CHECK(numPages_ != 0 || pool_ == nullptr);
   }
 
-  void append(uint8_t* address, int32_t numPages);
+  void append(uint8_t* address, MachinePageCount numPages);
 
   void clear() {
     runs_.clear();
@@ -184,6 +192,8 @@ class Allocation {
   VELOX_FRIEND_TEST(MemoryAllocatorTest, allocationClass1);
   VELOX_FRIEND_TEST(MemoryAllocatorTest, allocationClass2);
   VELOX_FRIEND_TEST(AllocationTest, append);
+  VELOX_FRIEND_TEST(AllocationTest, appendMove);
+  VELOX_FRIEND_TEST(AllocationTest, maxPageRunLimit);
 };
 
 /// Represents a run of contiguous pages that do not belong to any size class.
@@ -254,7 +264,7 @@ class ContiguousAllocation {
 
   // Adjusts 'size' towards 'maxSize' by 'increment' pages. Rounds
   // 'increment' to huge pages, since this is the unit of growth of
-  // RSS for large contiguous runs.  Increases the reservation in in
+  // RSS for large contiguous runs.  Increases the reservation in
   // 'pool_' and its allocator. May fail by cap exceeded. If failing,
   // the size is not changed. 'size_' cannot exceed 'maxSize_'.
   void grow(MachinePageCount increment);

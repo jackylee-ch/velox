@@ -42,6 +42,7 @@ class ExprToSubfieldFilterTest : public testing::Test {
   static void SetUpTestSuite() {
     functions::prestosql::registerAllScalarFunctions();
     parse::registerTypeResolver();
+    memory::MemoryManager::testingSetInstance({});
   }
 
   core::TypedExprPtr parseExpr(
@@ -66,7 +67,7 @@ class ExprToSubfieldFilterTest : public testing::Test {
 
  private:
   std::shared_ptr<memory::MemoryPool> pool_ =
-      memory::addDefaultLeafMemoryPool();
+      memory::memoryManager()->addLeafPool();
   core::QueryCtx queryCtx_;
   SimpleExpressionEvaluator evaluator_{&queryCtx_, pool_.get()};
 };
@@ -225,6 +226,25 @@ TEST_F(ExprToSubfieldFilterTest, nonConstant) {
 
 TEST_F(ExprToSubfieldFilterTest, userError) {
   auto call = parseCallExpr("a = 1 / 0", ROW({{"a", BIGINT()}}));
+  Subfield subfield;
+  auto filter = leafCallToSubfieldFilter(*call, subfield, evaluator());
+  ASSERT_FALSE(filter);
+}
+
+TEST_F(ExprToSubfieldFilterTest, dereferenceWithEmptyField) {
+  auto call = std::make_shared<core::CallTypedExpr>(
+      BOOLEAN(),
+      std::vector<core::TypedExprPtr>{
+          std::make_shared<core::DereferenceTypedExpr>(
+              REAL(),
+              std::make_shared<core::FieldAccessTypedExpr>(
+                  ROW({{"", DOUBLE()}, {"", REAL()}, {"", BIGINT()}}),
+                  std::make_shared<core::InputTypedExpr>(ROW(
+                      {{"c0",
+                        ROW({{"", DOUBLE()}, {"", REAL()}, {"", BIGINT()}})}})),
+                  "c0"),
+              1)},
+      "is_null");
   Subfield subfield;
   auto filter = leafCallToSubfieldFilter(*call, subfield, evaluator());
   ASSERT_FALSE(filter);

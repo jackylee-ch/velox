@@ -8,6 +8,12 @@ Unless specified otherwise, all functions return NULL if at least one of the arg
 
     Returns unicode code point of the first character of ``string``. Returns 0 if ``string`` is empty.
 
+.. spark:function:: bit_length(string/binary) -> integer
+
+    Returns the bit length for the specified string column. ::
+        
+        SELECT bit_length('123'); -- 24
+
 .. spark:function:: chr(n) -> varchar
 
     Returns the Unicode code point ``n`` as a single character string.
@@ -23,6 +29,30 @@ Unless specified otherwise, all functions return NULL if at least one of the arg
         SELECT contains('Spark SQL', null); -- NULL
         SELECT contains(x'537061726b2053514c', x'537061726b'); -- true
 
+.. spark:function:: conv(number, fromBase, toBase) -> varchar
+
+    Converts ``number`` represented as a string from ``fromBase`` to ``toBase``.
+    ``fromBase`` must be an INTEGER value between 2 and 36 inclusively. ``toBase`` must
+    be an INTEGER value between 2 and 36 inclusively or between -36 and -2 inclusively.
+    Otherwise, returns NULL.
+    Returns a signed number if ``toBase`` is negative. Otherwise, returns an unsigned one.
+    Returns NULL if ``number`` is empty.
+    Skips leading spaces. ``number`` may contain other characters not valid for ``fromBase``.
+    All characters starting from the first invalid character till the end of the string are
+    ignored. Only converts valid characters even though ``fromBase`` = ``toBase``. Returns
+    '0' if no valid character is found. ::
+
+        SELECT conv('100', 2, 10); -- '4'
+        SELECT conv('-10', 16, -10); -- '-16'
+        SELECT conv("-1", 10, 16); -- 'FFFFFFFFFFFFFFFF'
+        SELECT conv("123", 10, 39); -- NULL
+        SELECT conv('', 16, 10); -- NULL
+        SELECT conv(' ', 2, 10); -- NULL
+        SELECT conv("11", 10, 16); -- 'B'
+        SELECT conv("11ABC", 10, 16); -- 'B'
+        SELECT conv("11abc", 10, 10); -- '11'
+        SELECT conv('H016F', 16, 10); -- '0'
+
 .. spark:function:: endswith(left, right) -> boolean
 
     Returns true if 'left' ends with 'right'. Otherwise, returns false. ::
@@ -30,6 +60,20 @@ Unless specified otherwise, all functions return NULL if at least one of the arg
         SELECT endswith('js SQL', 'SQL'); -- true
         SELECT endswith('js SQL', 'js'); -- false
         SELECT endswith('js SQL', NULL); -- NULL
+
+.. spark:function:: find_in_set(str, strArray) -> integer
+
+    Returns 1-based index of the given string ``str`` in the comma-delimited list ``strArray``.
+    Returns 0, if the string was not found or if the given string ``str`` contains a comma. ::
+
+        SELECT find_in_set('ab', 'abc,b,ab,c,def'); -- 3
+        SELECT find_in_set('ab,', 'abc,b,ab,c,def'); -- 0
+        SELECT find_in_set('dfg', 'abc,b,ab,c,def'); -- 0
+        SELECT find_in_set('', ''); -- 1
+        SELECT find_in_set('', '123,'); -- 2
+        SELECT find_in_set('', ',123'); -- 1
+        SELECT find_in_set(NULL, ',123'); -- NULL
+        SELECT find_in_set("abc", NULL); -- NULL
 
 .. spark:function:: instr(string, substring) -> integer
 
@@ -97,10 +141,21 @@ Unless specified otherwise, all functions return NULL if at least one of the arg
         SELECT overlay('Spark SQL', 'tructured', 2, 4); -- "Structured SQL"
         SELECT overlay('Spark SQL', '_', -6, 3); -- "_Sql"
 
-.. spark:function:: replace(string, search, replace) -> string
+.. spark:function:: replace(input, replaced) -> varchar
 
-    Replaces all occurrences of `search` with `replace`. ::
+    Removes all instances of ``replaced`` from ``input``.
+    If ``replaced`` is an empty string, returns the original ``input`` string. ::
 
+        SELECT replace('ABCabc', ''); -- ABCabc
+        SELECT replace('ABCabc', 'bc'); -- ABCc
+
+.. spark:function:: replace(input, replaced, replacement) -> varchar
+
+    Replaces all instances of ``replaced`` with ``replacement`` in ``input``.
+    If ``replaced`` is an empty string, returns the original ``input`` string. ::
+
+        SELECT replace('ABCabc', '', 'DEF'); -- ABCabc
+        SELECT replace('ABCabc', 'abc', ''); -- ABC
         SELECT replace('ABCabc', 'abc', 'DEF'); -- ABCDEF
 
 .. spark:function:: rpad(string, len, pad) -> string
@@ -157,6 +212,20 @@ Unless specified otherwise, all functions return NULL if at least one of the arg
         SELECT startswith('js SQL', 'SQL'); -- false
         SELECT startswith('js SQL', null); -- NULL
 
+.. spark:function:: str_to_map(string, entryDelimiter, keyValueDelimiter) -> map(string, string)
+
+    Returns a map by splitting ``string`` into entries with ``entryDelimiter`` and splitting
+    each entry into key/value with ``keyValueDelimiter``.
+    ``entryDelimiter`` and ``keyValueDelimiter`` must be constant strings with single ascii
+    character. Allows ``keyValueDelimiter`` not found when splitting an entry. Throws exception
+    when duplicate map keys are found for single row's result, consistent with Spark's default
+    behavior. ::
+
+        SELECT str_to_map('a:1,b:2,c:3', ',', ':'); -- {"a":"1","b":"2","c":"3"}
+        SELECT str_to_map('a', ',', ':'); -- {"a":NULL}
+        SELECT str_to_map('', ',', ':'); -- {"":NULL}
+        SELECT str_to_map('a:1,b:2,c:3', ',', ','); -- {"a:1":NULL,"b:2":NULL,"c:3":NULL}
+
 .. spark:function:: substring(string, start) -> varchar
 
     Returns the rest of ``string`` from the starting position ``start``.
@@ -181,6 +250,30 @@ Unless specified otherwise, all functions return NULL if at least one of the arg
         SELECT substring('Spark SQL', -9, 3); -- "Spa"
         SELECT substring('Spark SQL', -10, 3); -- "Sp"
         SELECT substring('Spark SQL', -20, 3); -- ""
+
+.. spark:function:: substring_index(string, delim, count) -> [same as string]
+
+    Returns the substring from ``string`` before ``count`` occurrences of the delimiter ``delim``.
+    Here the ``string`` can be VARCHAR or VARBINARY and return type matches type of ``string``.
+    If ``count`` is positive, returns everything to the left of the final delimiter
+    (counting from the left). If ``count`` is negative, returns everything to the right
+    of the final delimiter (counting from the right). If ``count`` is 0, returns empty string.
+    If ``delim`` is not found or found fewer times than ``count``, returns the original input string.
+    ``delim`` is case-sensitive. It also takes into account overlapping strings. ::
+
+        SELECT substring_index('Spark.SQL', '.', 1); -- "Spark"
+        SELECT substring_index('Spark.SQL', '.', 0); -- ""
+        SELECT substring_index('Spark.SQL', '.', -1); -- "SQL"
+        SELECT substring_index('TEST.Spark.SQL', '.',2); -- "TEST.Spark"
+        SELECT substring_index('TEST.Spark.SQL', '', 0); -- ""
+        SELECT substring_index('TEST.Spark.SQL', '.', -2); -- "Spark.SQL"
+        SELECT substring_index('TEST.Spark.SQL', '.', 10); -- "TEST.Spark.SQL"
+        SELECT substring_index('TEST.Spark.SQL', '.', -12); -- "TEST.Spark.SQL"
+        SELECT substring_index('aaaaa', 'aa', 2); -- "a"
+        SELECT substring_index('aaaaa', 'aa', -4); -- "aaa"
+        SELECT substring_index('aaaaa', 'aa', 0); -- ""
+        SELECT substring_index('aaaaa', 'aa', 5); -- "aaaaa"
+        SELECT substring_index('aaaaa', 'aa', -5); -- "aaaaa"
 
 .. spark:function:: translate(string, match, replace) -> varchar
 

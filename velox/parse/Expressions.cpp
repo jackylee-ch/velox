@@ -16,6 +16,7 @@
 #include "velox/parse/Expressions.h"
 #include "velox/common/base/Exceptions.h"
 #include "velox/core/Expressions.h"
+#include "velox/exec/Aggregate.h"
 #include "velox/expression/SimpleFunctionRegistry.h"
 #include "velox/functions/FunctionRegistry.h"
 #include "velox/type/Type.h"
@@ -28,13 +29,6 @@ namespace facebook::velox::core {
 Expressions::TypeResolverHook Expressions::resolverHook_;
 
 namespace {
-std::vector<TypePtr> getTypes(const std::vector<TypedExprPtr>& inputs) {
-  std::vector<TypePtr> types{};
-  for (auto& i : inputs) {
-    types.push_back(i->type());
-  }
-  return types;
-}
 
 // Determine output type based on input types.
 TypePtr resolveTypeImpl(
@@ -48,8 +42,8 @@ TypePtr resolveTypeImpl(
 namespace {
 std::shared_ptr<const core::CastTypedExpr> makeTypedCast(
     const TypePtr& type,
-    const std::vector<TypedExprPtr>& inputs) {
-  return std::make_shared<const core::CastTypedExpr>(type, inputs, false);
+    const TypedExprPtr& input) {
+  return std::make_shared<const core::CastTypedExpr>(type, input, false);
 }
 
 std::vector<TypePtr> implicitCastTargets(const TypePtr& type) {
@@ -84,7 +78,7 @@ std::vector<TypePtr> implicitCastTargets(const TypePtr& type) {
       break;
     }
     default: // make compilers happy
-        ;
+      (void)0; // Statement to avoid empty semicolon warning
   }
   return targetTypes;
 }
@@ -99,7 +93,7 @@ std::vector<TypedExprPtr> genImplicitCasts(const TypedExprPtr& typedExpr) {
   std::vector<TypedExprPtr> implicitCasts;
   implicitCasts.reserve(targetTypes.size());
   for (auto targetType : targetTypes) {
-    implicitCasts.emplace_back(makeTypedCast(targetType, {typedExpr}));
+    implicitCasts.emplace_back(makeTypedCast(targetType, typedExpr));
   }
   return implicitCasts;
 }
@@ -138,21 +132,6 @@ TypedExprPtr adjustLastNArguments(
   }
 
   return nullptr;
-}
-
-std::string toString(
-    const std::shared_ptr<const core::CallExpr>& expr,
-    const std::vector<TypedExprPtr>& inputs) {
-  std::ostringstream signature;
-  signature << expr->getFunctionName() << "(";
-  for (auto i = 0; i < inputs.size(); i++) {
-    if (i > 0) {
-      signature << ", ";
-    }
-    signature << inputs[i]->type()->toString();
-  }
-  signature << ")";
-  return signature.str();
 }
 
 TypedExprPtr createWithImplicitCast(
@@ -245,10 +224,15 @@ TypedExprPtr Expressions::inferTypes(
     auto input = children.at(0)->type();
     auto& row = input->asRow();
     auto childIndex = row.getChildIdx(fae->getFieldName());
-    return std::make_shared<FieldAccessTypedExpr>(
-        input->childAt(childIndex),
-        children.at(0),
-        std::string{fae->getFieldName()});
+    if (fae->isRootColumn()) {
+      return std::make_shared<FieldAccessTypedExpr>(
+          input->childAt(childIndex),
+          children.at(0),
+          std::string{fae->getFieldName()});
+    } else {
+      return std::make_shared<DereferenceTypedExpr>(
+          input->childAt(childIndex), children.at(0), childIndex);
+    }
   }
   if (auto fun = std::dynamic_pointer_cast<const CallExpr>(expr)) {
     return createWithImplicitCast(fun, std::move(children));
@@ -262,11 +246,16 @@ TypedExprPtr Expressions::inferTypes(
       // ConstantVector<ComplexType>.
       VELOX_CHECK_NOT_NULL(
           pool, "parsing array literals requires a memory pool");
-      auto arrayVector = variantArrayToVector(
-          constant->type(), constant->value().array(), pool);
-      auto constantVector =
-          std::make_shared<ConstantVector<velox::ComplexType>>(
-              pool, 1, 0, arrayVector);
+      VectorPtr constantVector;
+      if (constant->value().isNull()) {
+        constantVector =
+            BaseVector::createNullConstant(constant->type(), 1, pool);
+      } else {
+        auto arrayVector = variantArrayToVector(
+            constant->type(), constant->value().array(), pool);
+        constantVector = std::make_shared<ConstantVector<velox::ComplexType>>(
+            pool, 1, 0, arrayVector);
+      }
       return std::make_shared<const ConstantTypedExpr>(constantVector);
     }
     return std::make_shared<const ConstantTypedExpr>(
@@ -315,35 +304,60 @@ TypedExprPtr Expressions::resolveLambdaExpr(
       signature, inferTypes(body, lambdaRow, pool));
 }
 
+namespace {
+bool isLambdaSignature(
+    const exec::FunctionSignature* signature,
+    const std::shared_ptr<const CallExpr>& callExpr) {
+  if (!hasLambdaArgument(*signature)) {
+    return false;
+  }
+
+  const auto numArguments = callExpr->getInputs().size();
+
+  if (numArguments != signature->argumentTypes().size()) {
+    return false;
+  }
+
+  bool match = true;
+  for (auto i = 0; i < numArguments; ++i) {
+    if (auto lambda = dynamic_cast<const core::LambdaExpr*>(
+            callExpr->getInputs()[i].get())) {
+      const auto numLambdaInputs = lambda->inputNames().size();
+      const auto& argumentType = signature->argumentTypes()[i];
+      if (!isLambdaArgument(argumentType, numLambdaInputs)) {
+        match = false;
+        break;
+      }
+    }
+  }
+
+  return match;
+}
+
+const exec::FunctionSignature* findLambdaSignature(
+    const std::vector<std::shared_ptr<exec::AggregateFunctionSignature>>&
+        signatures,
+    const std::shared_ptr<const CallExpr>& callExpr) {
+  const exec::FunctionSignature* matchingSignature = nullptr;
+  for (const auto& signature : signatures) {
+    if (isLambdaSignature(signature.get(), callExpr)) {
+      VELOX_CHECK_NULL(
+          matchingSignature,
+          "Cannot resolve ambiguous lambda function signatures for {}.",
+          callExpr->getFunctionName());
+      matchingSignature = signature.get();
+    }
+  }
+
+  return matchingSignature;
+}
+
 const exec::FunctionSignature* findLambdaSignature(
     const std::vector<const exec::FunctionSignature*>& signatures,
     const std::shared_ptr<const CallExpr>& callExpr) {
   const exec::FunctionSignature* matchingSignature = nullptr;
   for (const auto& signature : signatures) {
-    if (!hasLambdaArgument(*signature)) {
-      continue;
-    }
-
-    const auto numArguments = callExpr->getInputs().size();
-
-    if (numArguments != signature->argumentTypes().size()) {
-      continue;
-    }
-
-    bool match = true;
-    for (auto i = 0; i < numArguments; ++i) {
-      const auto& argumentType = signature->argumentTypes()[i];
-      if (auto lambda = dynamic_cast<const core::LambdaExpr*>(
-              callExpr->getInputs()[i].get())) {
-        const auto numLambdaInputs = lambda->inputNames().size();
-        if (!isLambdaArgument(argumentType, numLambdaInputs)) {
-          match = false;
-          break;
-        }
-      }
-    }
-
-    if (match) {
+    if (isLambdaSignature(signature, callExpr)) {
       VELOX_CHECK_NULL(
           matchingSignature,
           "Cannot resolve ambiguous lambda function signatures for {}.",
@@ -355,18 +369,36 @@ const exec::FunctionSignature* findLambdaSignature(
   return matchingSignature;
 }
 
+// Assumes no overlap in function names between scalar and aggregate functions,
+// i.e. 'foo' is either a scalar or aggregate function.
+const exec::FunctionSignature* findLambdaSignature(
+    const std::shared_ptr<const CallExpr>& callExpr) {
+  // Look for a scalar lambda function.
+  auto allSignatures = getFunctionSignatures();
+  auto it = allSignatures.find(callExpr->getFunctionName());
+
+  if (it != allSignatures.end()) {
+    return findLambdaSignature(it->second, callExpr);
+  }
+
+  // Look for an aggregate lambda function.
+  if (auto signatures =
+          exec::getAggregateFunctionSignatures(callExpr->getFunctionName())) {
+    return findLambdaSignature(signatures.value(), callExpr);
+  }
+
+  return nullptr;
+}
+
+} // namespace
+
 // static
 TypedExprPtr Expressions::tryResolveCallWithLambdas(
     const std::shared_ptr<const CallExpr>& callExpr,
     const TypePtr& inputRow,
     memory::MemoryPool* pool) {
-  auto allSignatures = getFunctionSignatures();
-  auto it = allSignatures.find(callExpr->getFunctionName());
-  if (it == allSignatures.end()) {
-    return nullptr;
-  }
+  auto signature = findLambdaSignature(callExpr);
 
-  auto signature = findLambdaSignature(it->second, callExpr);
   if (signature == nullptr) {
     return nullptr;
   }

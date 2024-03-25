@@ -15,45 +15,101 @@
  */
 
 #ifdef VELOX_ENABLE_S3
+#include "velox/connectors/hive/HiveConfig.h"
 #include "velox/connectors/hive/storage_adapters/s3fs/S3FileSystem.h"
 #include "velox/connectors/hive/storage_adapters/s3fs/S3Util.h"
-#include "velox/core/Config.h"
+#include "velox/dwio/common/FileSink.h"
 #endif
+
+#include "velox/connectors/hive/storage_adapters/s3fs/RegisterS3FileSystem.h"
 
 namespace facebook::velox::filesystems {
 
 #ifdef VELOX_ENABLE_S3
-folly::once_flag S3FSInstantiationFlag;
+using FileSystemMap = folly::Synchronized<
+    std::unordered_map<std::string, std::shared_ptr<FileSystem>>>;
 
-std::function<std::shared_ptr<
-    FileSystem>(std::shared_ptr<const Config>, std::string_view)>
-fileSystemGenerator() {
-  static auto filesystemGenerator = [](std::shared_ptr<const Config> properties,
-                                       std::string_view filePath) {
-    // Only one instance of S3FileSystem is supported for now.
-    // TODO: Support multiple S3FileSystem instances using a cache
-    // Initialize on first access and reuse after that.
-    static std::shared_ptr<FileSystem> s3fs;
-    folly::call_once(S3FSInstantiationFlag, [&properties]() {
-      std::shared_ptr<S3FileSystem> fs;
-      if (properties != nullptr) {
-        fs = std::make_shared<S3FileSystem>(properties);
-      } else {
-        fs =
-            std::make_shared<S3FileSystem>(std::make_shared<core::MemConfig>());
-      }
-      fs->initializeClient();
-      s3fs = fs;
-    });
-    return s3fs;
-  };
-  return filesystemGenerator;
+/// Multiple S3 filesystems are supported.
+/// Key is the endpoint value specified in the config using hive.s3.endpoint.
+/// If the endpoint is empty, it will default to AWS S3.
+FileSystemMap& fileSystems() {
+  static FileSystemMap instances;
+  return instances;
+}
+
+std::string getS3Identity(const std::shared_ptr<core::MemConfig>& config) {
+  HiveConfig hiveConfig = HiveConfig(config);
+  auto endpoint = hiveConfig.s3Endpoint();
+  if (!endpoint.empty()) {
+    // The identity is the endpoint.
+    return endpoint;
+  }
+  // Default key value.
+  return "aws-s3-key";
+}
+
+std::shared_ptr<FileSystem> fileSystemGenerator(
+    std::shared_ptr<const Config> properties,
+    std::string_view /*filePath*/) {
+  std::shared_ptr<core::MemConfig> config = std::make_shared<core::MemConfig>();
+  if (properties) {
+    *config = core::MemConfig(properties->values());
+  }
+  const auto s3Identity = getS3Identity(config);
+
+  return fileSystems().withWLock(
+      [&](auto& instanceMap) -> std::shared_ptr<FileSystem> {
+        initializeS3(config.get());
+        auto iterator = instanceMap.find(s3Identity);
+        if (iterator == instanceMap.end()) {
+          auto fs = std::make_shared<S3FileSystem>(properties);
+          instanceMap.insert({s3Identity, fs});
+          return fs;
+        }
+        return iterator->second;
+      });
+}
+
+std::unique_ptr<velox::dwio::common::FileSink> s3WriteFileSinkGenerator(
+    const std::string& fileURI,
+    const velox::dwio::common::FileSink::Options& options) {
+  if (isS3File(fileURI)) {
+    auto fileSystem =
+        filesystems::getFileSystem(fileURI, options.connectorProperties);
+    return std::make_unique<dwio::common::WriteFileSink>(
+        fileSystem->openFileForWrite(fileURI, {{}, options.pool}),
+        fileURI,
+        options.metricLogger,
+        options.stats);
+  }
+  return nullptr;
 }
 #endif
 
 void registerS3FileSystem() {
 #ifdef VELOX_ENABLE_S3
-  registerFileSystem(isS3File, fileSystemGenerator());
+  fileSystems().withWLock([&](auto& instanceMap) {
+    if (instanceMap.empty()) {
+      registerFileSystem(isS3File, std::function(fileSystemGenerator));
+      dwio::common::FileSink::registerFactory(
+          std::function(s3WriteFileSinkGenerator));
+    }
+  });
+#endif
+}
+
+void finalizeS3FileSystem() {
+#ifdef VELOX_ENABLE_S3
+  bool singleUseCount = true;
+  fileSystems().withWLock([&](auto& instanceMap) {
+    for (const auto& [id, fs] : instanceMap) {
+      singleUseCount &= (fs.use_count() == 1);
+    }
+    VELOX_CHECK(singleUseCount, "Cannot finalize S3FileSystem while in use");
+    instanceMap.clear();
+  });
+
+  finalizeS3();
 #endif
 }
 

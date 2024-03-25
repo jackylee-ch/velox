@@ -175,7 +175,7 @@ class MaxSizeForStatsAggregate
     });
 
     getVectorSerde()->estimateSerializedSize(
-        vector,
+        vector.get(),
         folly::Range(elementIndices_.data(), elementIndices_.size()),
         elementSizePtrs_.data());
   }
@@ -202,18 +202,23 @@ class MaxSizeForStatsAggregate
   }
 };
 
-exec::AggregateRegistrationResult registerMaxSizeForStats(
-    const std::string& name) {
+} // namespace
+
+void registerMaxDataSizeForStatsAggregate(
+    const std::string& prefix,
+    bool withCompanionFunctions,
+    bool overwrite) {
   std::vector<std::shared_ptr<exec::AggregateFunctionSignature>> signatures;
 
   signatures.push_back(exec::AggregateFunctionSignatureBuilder()
                            .typeVariable("T")
-                           .returnType("BIGINT")
-                           .intermediateType("BIGINT")
+                           .returnType("bigint")
+                           .intermediateType("bigint")
                            .argumentType("T")
                            .build());
 
-  return exec::registerAggregateFunction(
+  auto name = prefix + kMaxSizeForStats;
+  exec::registerAggregateFunction(
       name,
       std::move(signatures),
       [name](
@@ -226,13 +231,9 @@ exec::AggregateRegistrationResult registerMaxSizeForStats(
         auto inputType = argTypes[0];
 
         return std::make_unique<MaxSizeForStatsAggregate>(resultType);
-      });
-}
-
-} // namespace
-
-void registerMaxDataSizeForStatsAggregate(const std::string& prefix) {
-  registerMaxSizeForStats(prefix + kMaxSizeForStats);
+      },
+      withCompanionFunctions,
+      overwrite);
 }
 
 } // namespace facebook::velox::aggregate::prestosql

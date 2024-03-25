@@ -42,13 +42,14 @@ const std::vector<vector_size_t>& DecodedVector::consecutiveIndices() {
 const std::vector<vector_size_t>& DecodedVector::zeroIndices() {
   static std::vector<vector_size_t> indices(10'000);
   return indices;
-};
+}
 
 void DecodedVector::decode(
     const BaseVector& vector,
     const SelectivityVector* rows,
     bool loadLazy) {
   reset(end(vector.size(), rows));
+  partialRowsDecoded_ = rows != nullptr;
   loadLazy_ = loadLazy;
   bool isTopLevelLazyAndLoaded =
       vector.isLazy() && vector.asUnchecked<LazyVector>()->isLoaded();
@@ -413,32 +414,7 @@ VectorPtr DecodedVector::wrap(
       std::move(data));
 }
 
-void DecodedVector::unwrapRows(
-    SelectivityVector& unwrapped,
-    const SelectivityVector& rows) const {
-  if (isIdentityMapping_ && rows.isAllSelected()) {
-    unwrapped.resizeFill(baseVector_->size(), true);
-    return;
-  }
-
-  unwrapped.resizeFill(baseVector_->size(), false);
-
-  if (isIdentityMapping_) {
-    unwrapped.select(rows);
-  } else if (isConstantMapping_) {
-    unwrapped.setValid(constantIndex_, true);
-  } else {
-    rows.applyToSelected([&](vector_size_t row) {
-      if (!isNullAt(row)) {
-        unwrapped.setValid(index(row), true);
-      }
-    });
-  }
-
-  unwrapped.updateBounds();
-}
-
-const uint64_t* DecodedVector::nulls() {
+const uint64_t* DecodedVector::nulls(const SelectivityVector* rows) {
   if (allNulls_.has_value()) {
     return allNulls_.value();
   }
@@ -458,9 +434,19 @@ const uint64_t* DecodedVector::nulls() {
       // Copy base nulls.
       copiedNulls_.resize(bits::nwords(size_));
       auto* rawCopiedNulls = copiedNulls_.data();
-      for (auto i = 0; i < size_; ++i) {
-        bits::setNull(rawCopiedNulls, i, bits::isBitNull(nulls_, indices_[i]));
+      VELOX_CHECK(
+          partialRowsDecoded_ == (rows != nullptr),
+          "DecodedVector::nulls() must be called with the same rows as decode()");
+      if (rows != nullptr) {
+        // Partial consistency check: The end may be less than the decode time
+        // end but not greater.
+        VELOX_CHECK_LE(rows->end(), size_);
       }
+      auto baseSize = baseVector_->size();
+      applyToRows(rows, [&](auto i) {
+        VELOX_DCHECK_LT(indices_[i], baseSize);
+        bits::setNull(rawCopiedNulls, i, bits::isBitNull(nulls_, indices_[i]));
+      });
       allNulls_ = copiedNulls_.data();
     }
   }
@@ -478,5 +464,13 @@ void DecodedVector::applyToRows(const SelectivityVector* rows, Func&& func)
       func(i);
     }
   }
+}
+
+std::string DecodedVector::toString(vector_size_t idx) const {
+  if (isNullAt(idx)) {
+    return "null";
+  }
+
+  return baseVector_->toString(index(idx));
 }
 } // namespace facebook::velox

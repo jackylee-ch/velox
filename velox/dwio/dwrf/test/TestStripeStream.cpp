@@ -92,15 +92,29 @@ StripeStreamsImpl createAndLoadStripeStreams(
     const ColumnSelector& selector) {
   TestProvider indexProvider;
   StripeStreamsImpl streams{
-      stripeReader, selector, RowReaderOptions{}, 0, indexProvider, 0};
+      stripeReader,
+      selector,
+      RowReaderOptions{},
+      0,
+      StripeStreamsImpl::kUnknownStripeRows,
+      indexProvider,
+      0};
   enqueueReads(stripeReader, selector, 0, 0);
   streams.loadReadPlan();
   return streams;
 }
+
+class StripeStreamTest : public testing::Test {
+ protected:
+  static void SetUpTestCase() {
+    MemoryManager::testingSetInstance({});
+  }
+
+  std::shared_ptr<MemoryPool> pool_{memoryManager()->addLeafPool()};
+};
 } // namespace
 
-TEST(StripeStream, planReads) {
-  auto pool = addDefaultLeafMemoryPool();
+TEST_F(StripeStreamTest, planReads) {
   google::protobuf::Arena arena;
   auto footer = google::protobuf::Arena::CreateMessage<proto::Footer>(&arena);
   footer->set_rowindexstride(100);
@@ -109,10 +123,10 @@ TEST(StripeStream, planReads) {
   auto is = std::make_unique<RecordingInputStream>();
   auto isPtr = is.get();
   auto readerBase = std::make_shared<ReaderBase>(
-      *pool,
+      *pool_,
       std::make_unique<BufferedInput>(
           std::move(is),
-          *pool,
+          *pool_,
           MetricsLog::voidLog(),
           nullptr,
           BufferedInput::kMaxMergeDistance,
@@ -150,8 +164,7 @@ TEST(StripeStream, planReads) {
       1000300);
 }
 
-TEST(StripeStream, filterSequences) {
-  auto pool = addDefaultLeafMemoryPool();
+TEST_F(StripeStreamTest, filterSequences) {
   google::protobuf::Arena arena;
   auto footer = google::protobuf::Arena::CreateMessage<proto::Footer>(&arena);
   footer->set_rowindexstride(100);
@@ -160,8 +173,8 @@ TEST(StripeStream, filterSequences) {
   auto is = std::make_unique<RecordingInputStream>();
   auto isPtr = is.get();
   auto readerBase = std::make_shared<ReaderBase>(
-      *pool,
-      std::make_unique<BufferedInput>(std::move(is), *pool),
+      *pool_,
+      std::make_unique<BufferedInput>(std::move(is), *pool_),
       std::make_unique<PostScript>(proto::PostScript{}),
       footer,
       nullptr);
@@ -206,8 +219,7 @@ TEST(StripeStream, filterSequences) {
   }
 }
 
-TEST(StripeStream, zeroLength) {
-  auto pool = addDefaultLeafMemoryPool();
+TEST_F(StripeStreamTest, zeroLength) {
   google::protobuf::Arena arena;
   auto footer = google::protobuf::Arena::CreateMessage<proto::Footer>(&arena);
   footer->set_rowindexstride(100);
@@ -219,8 +231,8 @@ TEST(StripeStream, zeroLength) {
   auto is = std::make_unique<RecordingInputStream>();
   auto isPtr = is.get();
   auto readerBase = std::make_shared<ReaderBase>(
-      *pool,
-      std::make_unique<BufferedInput>(std::move(is), *pool),
+      *pool_,
+      std::make_unique<BufferedInput>(std::move(is), *pool_),
       std::make_unique<PostScript>(std::move(ps)),
       footer,
       nullptr);
@@ -241,7 +253,13 @@ TEST(StripeStream, zeroLength) {
   TestProvider indexProvider;
   ColumnSelector cs{std::dynamic_pointer_cast<const RowType>(type)};
   StripeStreamsImpl streams{
-      stripeReader, cs, RowReaderOptions{}, 0, indexProvider, 0};
+      stripeReader,
+      cs,
+      RowReaderOptions{},
+      0,
+      StripeStreamsImpl::kUnknownStripeRows,
+      indexProvider,
+      0};
   streams.loadReadPlan();
   auto const& actual = isPtr->getReads();
   EXPECT_EQ(actual.size(), 0);
@@ -259,8 +277,7 @@ TEST(StripeStream, zeroLength) {
   }
 }
 
-TEST(StripeStream, planReadsIndex) {
-  auto pool = addDefaultLeafMemoryPool();
+TEST_F(StripeStreamTest, planReadsIndex) {
   google::protobuf::Arena arena;
 
   // build ps
@@ -286,7 +303,7 @@ TEST(StripeStream, planReadsIndex) {
 
   // build cache
   std::string str(buffer.str());
-  auto cacheBuffer = std::make_shared<DataBuffer<char>>(*pool, str.size());
+  auto cacheBuffer = std::make_shared<DataBuffer<char>>(*pool_, str.size());
   memcpy(cacheBuffer->data(), str.data(), str.size());
   auto cache = std::make_unique<StripeMetadataCache>(
       StripeCacheMode::INDEX, FooterWrapper(footer), std::move(cacheBuffer));
@@ -294,8 +311,8 @@ TEST(StripeStream, planReadsIndex) {
   auto is = std::make_unique<RecordingInputStream>();
   auto isPtr = is.get();
   auto readerBase = std::make_shared<ReaderBase>(
-      *pool,
-      std::make_unique<BufferedInput>(std::move(is), *pool),
+      *pool_,
+      std::make_unique<BufferedInput>(std::move(is), *pool_),
       std::make_unique<PostScript>(std::move(ps)),
       footer,
       std::move(cache));
@@ -369,8 +386,8 @@ void addNode(T& t, uint32_t node, uint32_t offset = 0) {
   }
 }
 
-TEST(StripeStream, readEncryptedStreams) {
-  auto pool = defaultMemoryManager().addRootPool("readEncryptedStreams");
+TEST_F(StripeStreamTest, readEncryptedStreams) {
+  auto pool = memoryManager()->addRootPool("readEncryptedStreams");
   google::protobuf::Arena arena;
   proto::PostScript ps;
   ps.set_compression(proto::CompressionKind::ZSTD);
@@ -429,7 +446,13 @@ TEST(StripeStream, readEncryptedStreams) {
   ColumnSelector selector{readerBase->getSchema(), {1, 2, 4}, true};
   TestProvider provider;
   StripeStreamsImpl streams{
-      *stripeReader, selector, RowReaderOptions{}, 0, provider, 0};
+      *stripeReader,
+      selector,
+      RowReaderOptions{},
+      0,
+      StripeStreamsImpl::kUnknownStripeRows,
+      provider,
+      0};
 
   // make sure projected columns exist
   std::unordered_set<uint32_t> existed{1, 2, 4};
@@ -449,8 +472,8 @@ TEST(StripeStream, readEncryptedStreams) {
   }
 }
 
-TEST(StripeStream, schemaMismatch) {
-  auto pool = defaultMemoryManager().addRootPool("schemaMismatch");
+TEST_F(StripeStreamTest, schemaMismatch) {
+  auto pool = memoryManager()->addRootPool("schemaMismatch");
   google::protobuf::Arena arena;
   proto::PostScript ps;
   ps.set_compression(proto::CompressionKind::ZSTD);
@@ -489,7 +512,7 @@ TEST(StripeStream, schemaMismatch) {
       *readerPool,
       std::make_unique<BufferedInput>(
           std::make_shared<facebook::velox::InMemoryReadFile>(std::string()),
-          *pool),
+          *pool_),
       std::make_unique<PostScript>(std::move(ps)),
       footer,
       nullptr,
@@ -504,7 +527,13 @@ TEST(StripeStream, schemaMismatch) {
       std::dynamic_pointer_cast<const RowType>(schema), {4, 5}, true};
   TestProvider provider;
   StripeStreamsImpl streams{
-      *stripeReader, selector, RowReaderOptions{}, 0, provider, 0};
+      *stripeReader,
+      selector,
+      RowReaderOptions{},
+      0,
+      StripeStreamsImpl::kUnknownStripeRows,
+      provider,
+      0};
 
   // make sure all columns exist. Node id of b and c in the file is 3, 4
   for (uint32_t node = 3; node < 4; ++node) {
@@ -527,7 +556,7 @@ class TestStripeStreams : public StripeStreamsBase {
 
   const proto::ColumnEncoding& getEncoding(
       const EncodingKey& ek) const override {
-    return *getEncodingProxy(ek.node, ek.sequence);
+    return *getEncodingProxy(ek.node(), ek.sequence());
   }
 
   std::unique_ptr<SeekableInputStream> getStream(
@@ -535,8 +564,8 @@ class TestStripeStreams : public StripeStreamsBase {
       std::string_view /* label */,
       bool throwIfNotFound) const override {
     return std::unique_ptr<SeekableInputStream>(getStreamProxy(
-        si.encodingKey().node,
-        si.encodingKey().sequence,
+        si.encodingKey().node(),
+        si.encodingKey().sequence(),
         static_cast<proto::Stream_Kind>(si.kind()),
         throwIfNotFound));
   }
@@ -557,6 +586,10 @@ class TestStripeStreams : public StripeStreamsBase {
 
   bool getUseVInts(const DwrfStreamIdentifier& /* unused */) const override {
     return true; // current tests all expect results from using vints
+  }
+
+  int64_t stripeRows() const override {
+    VELOX_UNSUPPORTED();
   }
 
   uint32_t rowsPerRowGroup() const override {
@@ -590,10 +623,8 @@ proto::ColumnEncoding genColumnEncoding(
 }
 } // namespace
 
-TEST(StripeStream, shareDictionary) {
-  std::shared_ptr<MemoryPool> pool =
-      addDefaultLeafMemoryPool("shareDictionary");
-  TestStripeStreams ss(pool.get());
+TEST_F(StripeStreamTest, shareDictionary) {
+  TestStripeStreams ss(pool_.get());
 
   auto nonSharedDictionaryEncoding =
       genColumnEncoding(1, 0, proto::ColumnEncoding_Kind_DICTIONARY, 100);
@@ -641,7 +672,7 @@ TEST(StripeStream, shareDictionary) {
       ss, getStreamProxy(2, Not(0), proto::Stream_Kind_DICTIONARY_DATA, _))
       .WillRepeatedly(Return(nullptr));
 
-  facebook::velox::memory::AllocationPool allocPool(pool.get());
+  facebook::velox::memory::AllocationPool allocPool(pool_.get());
   StreamLabels labels(allocPool);
   std::vector<std::function<facebook::velox::BufferPtr()>> dictInits{};
   dictInits.push_back(

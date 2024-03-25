@@ -208,33 +208,12 @@ class ScanSpec {
   // corresponds to the ColumnReader tree.
   ScanSpec* getOrCreateChild(const Subfield& subfield);
 
-  bool matches(const Subfield::PathElement& element) const {
-    auto kind = element.kind();
-    switch (kind) {
-      case kNestedField:
-        return fieldName_ ==
-            reinterpret_cast<const Subfield::NestedField*>(&element)->name();
-      case kLongSubscript:
-        return subscript_ ==
-            reinterpret_cast<const Subfield::LongSubscript*>(&element)->index();
-      case kStringSubscript:
-        return fieldName_ ==
-            reinterpret_cast<const Subfield::StringSubscript*>(&element)
-                ->index();
-      default:
-        VELOX_CHECK(
-            false, "Only subfields that specify a single field are  supported");
-    }
-    return false;
-  }
-
   ScanSpec* childByName(const std::string& name) const {
-    for (auto& spec : children_) {
-      if (spec->fieldName_ == name) {
-        return spec.get();
-      }
+    auto it = childByFieldName_.find(name);
+    if (it == childByFieldName_.end()) {
+      return nullptr;
     }
-    return nullptr;
+    return it->second;
   }
 
   // Remove a child from this scan spec, returning the removed child.  This is
@@ -345,6 +324,14 @@ class ScanSpec {
   // projected out.
   void addAllChildFields(const Type&);
 
+  const std::vector<std::string>& flatMapFeatureSelection() const {
+    return flatMapFeatureSelection_;
+  }
+
+  void setFlatMapFeatureSelection(std::vector<std::string> features) {
+    flatMapFeatureSelection_ = std::move(features);
+  }
+
  private:
   void reorder();
 
@@ -409,6 +396,8 @@ class ScanSpec {
   // 'children_' is reorderable by a running scan.
   std::vector<ScanSpec*> stableChildren_;
 
+  folly::F14FastMap<std::string, ScanSpec*> childByFieldName_;
+
   mutable std::optional<bool> hasFilter_;
   ValueHook* valueHook_ = nullptr;
 
@@ -419,6 +408,9 @@ class ScanSpec {
   // Only take the first maxArrayElementsCount_ elements from each array.
   vector_size_t maxArrayElementsCount_ =
       std::numeric_limits<vector_size_t>::max();
+
+  // Used only for bulk reader to project flat map features.
+  std::vector<std::string> flatMapFeatureSelection_;
 };
 
 // Returns false if no value from a range defined by stats can pass the
